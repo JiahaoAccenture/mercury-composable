@@ -29,6 +29,8 @@ interface RightPanelProps {
   isGraphRefreshing?:      boolean;
   /** Callback for "Clip to Clipboard" from the node context menu in GraphView. */
   onClipNode?:             (node: MinigraphNode, connections: MinigraphConnection[]) => void;
+  /** Callback for "Edit Node" from the node context menu in GraphView. */
+  onEditNode?:             (node: MinigraphNode) => void;
   /**
    * When provided and non-null, the right panel renders a vertical split:
    * top = tab content, bottom = help panel.  Accepts either a plain ReactNode
@@ -60,6 +62,7 @@ export default function RightPanel({
   onGraphDataCopyError,
   isGraphRefreshing,
   onClipNode,
+  onEditNode,
   helpPanel,
 }: RightPanelProps) {
   const uid              = useId();
@@ -142,6 +145,7 @@ export default function RightPanel({
             onCopySuccess={onGraphDataCopySuccess}
             onCopyError={onGraphDataCopyError}
             onClipNode={onClipNode}
+            onEditNode={onEditNode}
           />
         </div>
       )}

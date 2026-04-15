@@ -1,0 +1,186 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.input,
+.propertyKey,
+.propertyValue {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input,
+.propertyKey {
+  min-height: 2.25rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.propertyValue {
+  min-height: 2.25rem;
+  resize: vertical;
+  padding: 0.45rem 0.55rem;
+  line-height: 1.4;
+}
+
+.input:focus,
+.propertyKey:focus,
+.propertyValue:focus {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+  border-color: var(--primary-color);
+}
+
+.input[readonly] {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.hint,
+.sectionHint {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.propertiesSection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.propertyRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.propertyRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.45fr) minmax(180px, 1fr) auto;
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.emptyProperties {
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  padding: 0.85rem;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.errorBanner {
+  color: var(--danger-color);
+  background: var(--danger-08);
+  border: 1px solid var(--danger-30);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.primaryButton,
+.secondaryButton,
+.addButton,
+.removeButton {
+  appearance: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.primaryButton,
+.secondaryButton {
+  padding: 0.42rem 0.9rem;
+}
+
+.addButton,
+.removeButton {
+  padding: 0.36rem 0.7rem;
+}
+
+.primaryButton {
+  border: 1px solid var(--primary-hover);
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.secondaryButton,
+.addButton {
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.secondaryButton:hover,
+.addButton:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.removeButton {
+  border: 1px solid var(--danger-30);
+  background: var(--danger-08);
+  color: var(--danger-color);
+}
+
+.removeButton:hover {
+  border-color: var(--danger-color);
+}
+
+.primaryButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .sectionHeader {
+    flex-direction: column;
+  }
+
+  .propertyRow {
+    grid-template-columns: 1fr;
+  }
+}

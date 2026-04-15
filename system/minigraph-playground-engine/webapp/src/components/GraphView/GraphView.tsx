@@ -13,10 +13,10 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { nodeTypes } from './NodeTypes';
+import GraphContextMenu, { type NodeContextMenuState } from './GraphContextMenu';
 import { GraphViewErrorBoundary } from './GraphViewErrorBoundary';
 import { transformGraphData, type GraphNodeData, type GraphEdgeData } from '../../utils/graphTransformer';
 import type { MinigraphGraphData, MinigraphNode, MinigraphConnection } from '../../utils/graphTypes';
-import { findNodeByAlias, extractDirectConnections } from '../../clipboard/helpers';
 import GraphToolbar from '../GraphToolbar/GraphToolbar';
 import styles from './GraphView.module.css';
 
@@ -31,42 +31,17 @@ interface GraphViewProps {
   isRefreshing?:   boolean;
   /** Callback for "Clip to Clipboard" from the node context menu. */
   onClipNode?:     (node: MinigraphNode, connections: MinigraphConnection[]) => void;
+  /** Callback for "Edit Node" from the node context menu. */
+  onEditNode?:     (node: MinigraphNode) => void;
 }
 
 const EMPTY_NODES: Node<GraphNodeData>[]  = [];
 const EMPTY_EDGES: Edge<GraphEdgeData>[]  = [];
 
-export default function GraphView({ graphData, onCopySuccess, onCopyError, onRenderError, isRefreshing = false, onClipNode }: GraphViewProps) {
+export default function GraphView({ graphData, onCopySuccess, onCopyError, onRenderError, isRefreshing = false, onClipNode, onEditNode }: GraphViewProps) {
 
   // ── Context menu state ──────────────────────────────────────────────────
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    nodeAlias: string;
-  } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // Dismiss context menu on outside click or Escape
-  useEffect(() => {
-    if (!contextMenu) return;
-
-    const handleDismiss = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as globalThis.Node)) {
-        setContextMenu(null);
-      }
-    };
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
-    };
-
-    document.addEventListener('mousedown', handleDismiss);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handleDismiss);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [contextMenu]);
+  const [contextMenu, setContextMenu] = useState<NodeContextMenuState | null>(null);
 
   // Keep a stable ref so the useEffect below can fire the error callback without
   // needing onRenderError in the useMemo dependency array.
@@ -158,7 +133,7 @@ export default function GraphView({ graphData, onCopySuccess, onCopyError, onRen
           // colorMode="dark" // enable for dark mode
           proOptions={{ hideAttribution: false }}
           onNodeContextMenu={(event, node) => {
-            if (!onClipNode) return;
+            if (!onClipNode && !onEditNode) return;
             event.preventDefault();
             setContextMenu({ x: event.clientX, y: event.clientY, nodeAlias: node.data.alias });
           }}
@@ -197,29 +172,14 @@ export default function GraphView({ graphData, onCopySuccess, onCopyError, onRen
             />
           </div>
         )}
-        {contextMenu && onClipNode && graphData && (
-          <div
-            ref={menuRef}
-            className={styles.contextMenu}
-            style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x }}
-            role="menu"
-          >
-            <button
-              role="menuitem"
-              autoFocus
-              className={styles.contextMenuItem}
-              onClick={() => {
-                const node = findNodeByAlias(graphData, contextMenu.nodeAlias);
-                if (node) {
-                  const connections = extractDirectConnections(graphData, contextMenu.nodeAlias);
-                  onClipNode(node, connections);
-                }
-                setContextMenu(null);
-              }}
-            >
-              Clip to Clipboard
-            </button>
-          </div>
+        {contextMenu && graphData && (
+          <GraphContextMenu
+            menu={contextMenu}
+            graphData={graphData}
+            onClose={() => setContextMenu(null)}
+            onEditNode={onEditNode}
+            onClipNode={onClipNode}
+          />
         )}
       </div>
     </GraphViewErrorBoundary>

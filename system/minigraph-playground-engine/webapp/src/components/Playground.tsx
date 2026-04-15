@@ -25,6 +25,7 @@ import SavedGraphsMenu from './SavedGraphsMenu/SavedGraphsMenu';
 import RightPanel from './RightPanel/RightPanel';
 import LeftPanel from './LeftPanel/LeftPanel';
 import { MockUploadModal } from './MockUploadModal/MockUploadModal';
+import NodeDialog from './NodeDialog/NodeDialog';
 import ClipboardSidebar from './ClipboardSidebar/ClipboardSidebar';
 import HelpBrowser from './HelpBrowser/HelpBrowser';
 import { ClipboardDuplicateDialog } from './ClipboardSidebar/ClipboardDuplicateDialog';
@@ -41,6 +42,22 @@ import type { MinigraphNode, MinigraphConnection } from '../utils/graphTypes';
 interface PlaygroundProps {
   config: PlaygroundConfig;
 }
+
+const DEFAULT_NODE_TYPE_OPTIONS = [
+  'Root',
+  'End',
+  'Fetcher',
+  'mapper',
+  'Math',
+  'JavaScript',
+  'Provider',
+  'Dictionary',
+  'Join',
+  'Extension',
+  'Island',
+  'Decision',
+  'entry_point',
+];
 
 export default function Playground({ config }: PlaygroundProps) {
   const { title, wsPath, storageKeyPayload, storageKeyHistory, storageKeyTab, storageKeySavedGraphs, supportsUpload, supportsClipboard, supportsHelp, tabs } = config;
@@ -124,6 +141,11 @@ export default function Playground({ config }: PlaygroundProps) {
     tabs,
     storageKeyTab,
   );
+
+  const nodeTypeOptions = useMemo(() => {
+    const graphTypes = graphData?.nodes.flatMap(node => node.types) ?? [];
+    return Array.from(new Set([...DEFAULT_NODE_TYPE_OPTIONS, ...graphTypes].filter(Boolean)));
+  }, [graphData]);
 
   // ── Mock-upload modal ────────────────────────────────────────────────────
   const {
@@ -276,6 +298,25 @@ export default function Playground({ config }: PlaygroundProps) {
     }
   }, [clipboardCtx, wsPath, config.label, addToast]);
 
+  // ── Visual node edit workflow ───────────────────────────────────────────
+  const [editingNode, setEditingNode] = useState<MinigraphNode | null>(null);
+
+  const handleEditNode = useCallback((node: MinigraphNode) => {
+    setEditingNode(node);
+  }, []);
+
+  const handleSubmitNodeEdit = useCallback((node: MinigraphNode) => {
+    if (!ws.connected) {
+      addToast('Cannot update node while WebSocket is disconnected', 'error');
+      return;
+    }
+
+    const command = buildNodeCommand('update', node);
+    ws.sendRawText(command);
+    addToast(`Update command sent for "${node.alias}"`, 'info');
+    setEditingNode(null);
+  }, [ws, addToast]);
+
   // ── Saved graphs (localStorage snapshots) ────────────────────────────────
   // Only instantiated when the playground config provides a storage key so
   // playgrounds that don't use this feature have zero overhead.
@@ -355,6 +396,17 @@ export default function Playground({ config }: PlaygroundProps) {
           onSuccess={handleUploadSuccess}
           onClose={handleCloseUploadModal}
           onError={handleUploadError}
+        />
+      )}
+
+      {editingNode && (
+        <NodeDialog
+          mode="edit"
+          node={editingNode}
+          nodeTypeOptions={nodeTypeOptions}
+          disabled={!ws.connected}
+          onSubmit={handleSubmitNodeEdit}
+          onClose={() => setEditingNode(null)}
         />
       )}
 
@@ -480,6 +532,7 @@ export default function Playground({ config }: PlaygroundProps) {
             onGraphDataCopyError={() => addToast('Copy failed', 'error')}
             isGraphRefreshing={isRefreshing}
             onClipNode={supportsClipboard ? handleClipNode : undefined}
+            onEditNode={handleEditNode}
             helpPanel={supportsHelp && helpOpen ? (
               (onToggleMaximize: () => void, isMaximized: boolean) => (
                 <HelpBrowser
