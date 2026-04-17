@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   ReactFlow,
   Background,
@@ -13,8 +13,9 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { nodeTypes } from './NodeTypes';
-import GraphContextMenu, { type NodeContextMenuState } from './GraphContextMenu';
+import GraphContextMenu from './GraphContextMenu';
 import { GraphViewErrorBoundary } from './GraphViewErrorBoundary';
+import { useGraphContextMenu } from './useGraphContextMenu';
 import { transformGraphData, type GraphNodeData, type GraphEdgeData } from '../../utils/graphTransformer';
 import type { MinigraphGraphData, MinigraphNode, MinigraphConnection } from '../../utils/graphTypes';
 import GraphToolbar from '../GraphToolbar/GraphToolbar';
@@ -33,15 +34,22 @@ interface GraphViewProps {
   onClipNode?:     (node: MinigraphNode, connections: MinigraphConnection[]) => void;
   /** Callback for "Edit Node" from the node context menu. */
   onEditNode?:     (node: MinigraphNode) => void;
+  /** Callback for "Delete Node" from the node context menu. */
+  onDeleteNode?:   (node: MinigraphNode) => void;
+  /** Callback for "Create Node" from the canvas context menu. */
+  onCreateNode?:   () => void;
 }
 
 const EMPTY_NODES: Node<GraphNodeData>[]  = [];
 const EMPTY_EDGES: Edge<GraphEdgeData>[]  = [];
 
-export default function GraphView({ graphData, onCopySuccess, onCopyError, onRenderError, isRefreshing = false, onClipNode, onEditNode }: GraphViewProps) {
-
-  // ── Context menu state ──────────────────────────────────────────────────
-  const [contextMenu, setContextMenu] = useState<NodeContextMenuState | null>(null);
+export default function GraphView({ graphData, onCopySuccess, onCopyError, onRenderError, isRefreshing = false, onClipNode, onEditNode, onDeleteNode, onCreateNode }: GraphViewProps) {
+  const {
+    contextMenu,
+    openNodeMenu,
+    openCanvasMenu,
+    closeContextMenu,
+  } = useGraphContextMenu();
 
   // Keep a stable ref so the useEffect below can fire the error callback without
   // needing onRenderError in the useMemo dependency array.
@@ -133,11 +141,14 @@ export default function GraphView({ graphData, onCopySuccess, onCopyError, onRen
           // colorMode="dark" // enable for dark mode
           proOptions={{ hideAttribution: false }}
           onNodeContextMenu={(event, node) => {
-            if (!onClipNode && !onEditNode) return;
-            event.preventDefault();
-            setContextMenu({ x: event.clientX, y: event.clientY, nodeAlias: node.data.alias });
+            if (!onClipNode && !onEditNode && !onDeleteNode) return;
+            openNodeMenu(event, node.data.alias);
           }}
-          onPaneClick={() => setContextMenu(null)}
+          onPaneContextMenu={(event) => {
+            if (!onCreateNode) return;
+            openCanvasMenu(event);
+          }}
+          onPaneClick={closeContextMenu}
         >
           <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="rgba(255,255,255,0.07)" />
           <Controls showInteractive={false} />
@@ -176,8 +187,10 @@ export default function GraphView({ graphData, onCopySuccess, onCopyError, onRen
           <GraphContextMenu
             menu={contextMenu}
             graphData={graphData}
-            onClose={() => setContextMenu(null)}
+            onClose={closeContextMenu}
+            onCreateNode={onCreateNode}
             onEditNode={onEditNode}
+            onDeleteNode={onDeleteNode}
             onClipNode={onClipNode}
           />
         )}

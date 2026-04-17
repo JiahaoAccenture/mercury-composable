@@ -1,19 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MinigraphConnection, MinigraphGraphData, MinigraphNode } from '../../utils/graphTypes';
 import { extractDirectConnections, findNodeByAlias } from '../../clipboard/helpers';
+import type { GraphContextMenuState } from './useGraphContextMenu';
 import styles from './GraphView.module.css';
 
-export interface NodeContextMenuState {
-  x: number;
-  y: number;
-  nodeAlias: string;
-}
-
 interface GraphContextMenuProps {
-  menu: NodeContextMenuState;
+  menu: GraphContextMenuState;
   graphData: MinigraphGraphData;
   onClose: () => void;
+  onCreateNode?: () => void;
   onEditNode?: (node: MinigraphNode) => void;
+  onDeleteNode?: (node: MinigraphNode) => void;
   onClipNode?: (node: MinigraphNode, connections: MinigraphConnection[]) => void;
 }
 
@@ -21,10 +18,13 @@ export default function GraphContextMenu({
   menu,
   graphData,
   onClose,
+  onCreateNode,
   onEditNode,
+  onDeleteNode,
   onClipNode,
 }: GraphContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const [deleteConfirming, setDeleteConfirming] = useState(false);
 
   useEffect(() => {
     const handleDismiss = (event: MouseEvent) => {
@@ -45,6 +45,35 @@ export default function GraphContextMenu({
     };
   }, [onClose]);
 
+  useEffect(() => {
+    setDeleteConfirming(false);
+  }, [menu]);
+
+  if (menu.target === 'canvas') {
+    return (
+      <div
+        ref={menuRef}
+        className={styles.contextMenu}
+        style={{ position: 'fixed', top: menu.top, left: menu.left }}
+        role="menu"
+      >
+        {onCreateNode && (
+          <button
+            role="menuitem"
+            autoFocus
+            className={styles.contextMenuItem}
+            onClick={() => {
+              onCreateNode();
+              onClose();
+            }}
+          >
+            Create Node
+          </button>
+        )}
+      </div>
+    );
+  }
+
   const node = findNodeByAlias(graphData, menu.nodeAlias);
   if (!node) return null;
 
@@ -52,7 +81,7 @@ export default function GraphContextMenu({
     <div
       ref={menuRef}
       className={styles.contextMenu}
-      style={{ position: 'fixed', top: menu.y, left: menu.x }}
+      style={{ position: 'fixed', top: menu.top, left: menu.left }}
       role="menu"
     >
       {onEditNode && (
@@ -81,6 +110,25 @@ export default function GraphContextMenu({
           }}
         >
           Clip to Clipboard
+        </button>
+      )}
+
+      {onDeleteNode && (
+        <button
+          role="menuitem"
+          autoFocus={!onEditNode && !onClipNode}
+          className={`${styles.contextMenuItem} ${deleteConfirming ? styles.contextMenuDangerItem : ''}`}
+          onClick={() => {
+            if (!deleteConfirming) {
+              setDeleteConfirming(true);
+              return;
+            }
+
+            onDeleteNode(node);
+            onClose();
+          }}
+        >
+          {deleteConfirming ? 'Confirm Delete' : 'Delete Node'}
         </button>
       )}
     </div>

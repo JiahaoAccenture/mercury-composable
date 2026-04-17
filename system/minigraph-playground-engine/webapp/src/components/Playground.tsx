@@ -18,6 +18,7 @@ import { useGraphSaveName } from '../hooks/useGraphSaveName';
 import { useSavedGraphWorkflow } from '../hooks/useSavedGraphWorkflow';
 import { usePinnedGraphPath } from '../hooks/usePinnedGraphPath';
 import { buildNodeCommand } from '../clipboard/commandBuilder';
+import { buildGraphCommand } from '../graphActions/buildGraphCommand';
 import { ToastContainer } from './Toast';
 import Navigation from './Navigation';
 import GraphSaveButton from './GraphSaveButton/GraphSaveButton';
@@ -298,12 +299,50 @@ export default function Playground({ config }: PlaygroundProps) {
     }
   }, [clipboardCtx, wsPath, config.label, addToast]);
 
-  // ── Visual node edit workflow ───────────────────────────────────────────
+  // ── Visual node authoring workflow ──────────────────────────────────────
+  const [creatingNode, setCreatingNode] = useState(false);
   const [editingNode, setEditingNode] = useState<MinigraphNode | null>(null);
+
+  const handleCreateNode = useCallback(() => {
+    setCreatingNode(true);
+  }, []);
+
+  const handleSubmitNodeCreate = useCallback((node: MinigraphNode) => {
+    if (!ws.connected) {
+      addToast('Cannot create node while WebSocket is disconnected', 'error');
+      return;
+    }
+
+    const result = buildGraphCommand({ type: 'create-node', node }, { graphData });
+    if (!result.ok) {
+      addToast(result.message, 'error');
+      return;
+    }
+
+    ws.sendVisibleCommand(result.command);
+    addToast(`Create command sent for "${node.alias}"`, 'info');
+    setCreatingNode(false);
+  }, [graphData, ws, addToast]);
 
   const handleEditNode = useCallback((node: MinigraphNode) => {
     setEditingNode(node);
   }, []);
+
+  const handleDeleteNode = useCallback((node: MinigraphNode) => {
+    if (!ws.connected) {
+      addToast('Cannot delete node while WebSocket is disconnected', 'error');
+      return;
+    }
+
+    const result = buildGraphCommand({ type: 'delete-node', alias: node.alias }, { graphData });
+    if (!result.ok) {
+      addToast(result.message, 'error');
+      return;
+    }
+
+    ws.sendVisibleCommand(result.command);
+    addToast(`Delete command sent for "${node.alias}"`, 'info');
+  }, [graphData, ws, addToast]);
 
   const handleSubmitNodeEdit = useCallback((node: MinigraphNode) => {
     if (!ws.connected) {
@@ -311,11 +350,16 @@ export default function Playground({ config }: PlaygroundProps) {
       return;
     }
 
-    const command = buildNodeCommand('update', node);
-    ws.sendVisibleCommand(command);
+    const result = buildGraphCommand({ type: 'update-node', node }, { graphData });
+    if (!result.ok) {
+      addToast(result.message, 'error');
+      return;
+    }
+
+    ws.sendVisibleCommand(result.command);
     addToast(`Update command sent for "${node.alias}"`, 'info');
     setEditingNode(null);
-  }, [ws, addToast]);
+  }, [graphData, ws, addToast]);
 
   // ── Saved graphs (localStorage snapshots) ────────────────────────────────
   // Only instantiated when the playground config provides a storage key so
@@ -407,6 +451,16 @@ export default function Playground({ config }: PlaygroundProps) {
           disabled={!ws.connected}
           onSubmit={handleSubmitNodeEdit}
           onClose={() => setEditingNode(null)}
+        />
+      )}
+
+      {creatingNode && (
+        <NodeDialog
+          mode="create"
+          nodeTypeOptions={nodeTypeOptions}
+          disabled={!ws.connected}
+          onSubmit={handleSubmitNodeCreate}
+          onClose={() => setCreatingNode(false)}
         />
       )}
 
@@ -533,6 +587,8 @@ export default function Playground({ config }: PlaygroundProps) {
             isGraphRefreshing={isRefreshing}
             onClipNode={supportsClipboard ? handleClipNode : undefined}
             onEditNode={handleEditNode}
+            onDeleteNode={handleDeleteNode}
+            onCreateNode={handleCreateNode}
             helpPanel={supportsHelp && helpOpen ? (
               (onToggleMaximize: () => void, isMaximized: boolean) => (
                 <HelpBrowser

@@ -31,6 +31,10 @@ interface RightPanelProps {
   onClipNode?:             (node: MinigraphNode, connections: MinigraphConnection[]) => void;
   /** Callback for "Edit Node" from the node context menu in GraphView. */
   onEditNode?:             (node: MinigraphNode) => void;
+  /** Callback for "Delete Node" from the node context menu in GraphView. */
+  onDeleteNode?:           (node: MinigraphNode) => void;
+  /** Callback for "Create Node" from the canvas context menu in GraphView. */
+  onCreateNode?:           () => void;
   /**
    * When provided and non-null, the right panel renders a vertical split:
    * top = tab content, bottom = help panel.  Accepts either a plain ReactNode
@@ -63,6 +67,8 @@ export default function RightPanel({
   isGraphRefreshing,
   onClipNode,
   onEditNode,
+  onDeleteNode,
+  onCreateNode,
   helpPanel,
 }: RightPanelProps) {
   const uid              = useId();
@@ -146,6 +152,8 @@ export default function RightPanel({
             onCopyError={onGraphDataCopyError}
             onClipNode={onClipNode}
             onEditNode={onEditNode}
+            onDeleteNode={onDeleteNode}
+            onCreateNode={onCreateNode}
           />
         </div>
       )}

@@ -124,6 +124,15 @@
   background: var(--autocomplete-highlight);
 }
 
+.contextMenuDangerItem {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.contextMenuDangerItem:hover {
+  background: rgba(220, 38, 38, 0.12);
+}
+
 .contextMenuItem:focus-visible {
   outline: 2px solid var(--primary-color);
   outline-offset: -2px;

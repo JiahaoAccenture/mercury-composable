@@ -4,8 +4,8 @@ import type { MinigraphNode, MinigraphNodeProperties } from '../../utils/graphTy
 import styles from './NodeDialog.module.css';
 
 interface NodeDialogProps {
-  mode: 'edit';
-  node: MinigraphNode;
+  mode: 'create' | 'edit';
+  node?: MinigraphNode;
   nodeTypeOptions: string[];
   disabled?: boolean;
   onSubmit: (node: MinigraphNode) => void;
@@ -78,26 +78,33 @@ export default function NodeDialog({
   onSubmit,
   onClose,
 }: NodeDialogProps) {
-  const [nodeType, setNodeType] = useState(node.types[0] ?? '');
-  const [propertyRows, setPropertyRows] = useState<PropertyRow[]>(() => rowsFromProperties(node.properties));
+  const defaultType = node?.types[0] ?? nodeTypeOptions[0] ?? '';
+  const [alias, setAlias] = useState(node?.alias ?? '');
+  const [nodeType, setNodeType] = useState(defaultType);
+  const [propertyRows, setPropertyRows] = useState<PropertyRow[]>(
+    () => rowsFromProperties(node?.properties ?? {}),
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setNodeType(node.types[0] ?? '');
-    setPropertyRows(rowsFromProperties(node.properties));
+    setAlias(node?.alias ?? '');
+    setNodeType(node?.types[0] ?? nodeTypeOptions[0] ?? '');
+    setPropertyRows(rowsFromProperties(node?.properties ?? {}));
     setError(null);
-  }, [node]);
+  }, [node, mode, nodeTypeOptions]);
 
-  const title = mode === 'edit' ? 'Edit Node' : 'Node';
+  const title = mode === 'edit' ? 'Edit Node' : 'Create Node';
+  const formId = `node-${mode}-form`;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (disabled) {
-      setError('WebSocket is not connected. Reconnect before submitting node edits.');
+      setError('WebSocket is not connected. Reconnect before submitting node changes.');
       return;
     }
 
-    if (!node.alias.trim()) {
+    const trimmedAlias = alias.trim();
+    if (!trimmedAlias) {
       setError('Node alias is required.');
       return;
     }
@@ -114,7 +121,7 @@ export default function NodeDialog({
     }
 
     onSubmit({
-      alias: node.alias,
+      alias: trimmedAlias,
       types: [nodeType.trim()],
       properties: propertiesFromRows(propertyRows),
     });
@@ -145,32 +152,38 @@ export default function NodeDialog({
   return (
     <ModalShell
       title={title}
-      subtitle={`Alias: ${node.alias}`}
+      subtitle={mode === 'edit' ? `Alias: ${alias}` : 'Create a new node in the current graph.'}
       onClose={onClose}
       footer={(
         <>
           <button type="button" className={styles.secondaryButton} onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" form="node-edit-form" className={styles.primaryButton} disabled={disabled}>
-            Save Changes
+          <button type="submit" form={formId} className={styles.primaryButton} disabled={disabled}>
+            {mode === 'edit' ? 'Save Changes' : 'Create Node'}
           </button>
         </>
       )}
     >
-      <form id="node-edit-form" className={styles.form} onSubmit={handleSubmit}>
+      <form id={formId} className={styles.form} onSubmit={handleSubmit}>
         {error && <div className={styles.errorBanner}>{error}</div>}
 
         <label className={styles.field}>
           <span className={styles.label}>Alias</span>
           <input
             className={styles.input}
-            value={node.alias}
-            readOnly
+            value={alias}
+            readOnly={mode === 'edit'}
             aria-describedby="node-alias-help"
+            onChange={(event) => {
+              setError(null);
+              setAlias(event.target.value);
+            }}
           />
           <span id="node-alias-help" className={styles.hint}>
-            Alias is read-only for this first edit flow because connections reference it.
+            {mode === 'edit'
+              ? 'Alias is read-only for this first edit flow because connections reference it.'
+              : 'Use a unique alias without spaces. The backend command uses this as the node name.'}
           </span>
         </label>
 
