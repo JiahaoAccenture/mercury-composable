@@ -62,6 +62,8 @@ export interface UseWebSocketReturn {
   clearMessages:    () => void;
   uploadPayload:    () => void;
   sendRawText:      (text: string) => void;
+  /** Send generated command text and show the exact command in the console/history. */
+  sendVisibleCommand: (text: string) => void;
   /** Append a local-only message to this slot's console (no WebSocket round-trip). */
   appendMessage:    (raw: string) => void;
   /** Ordered command history for this playground slot (newest-first). */
@@ -308,6 +310,21 @@ export function useWebSocket({ wsPath, storageKeyHistory, payload, addToast, bus
     ctx.send(wsPath, text);
   }, [ctx, wsPath, phase]);
 
+  // --- Public: send generated command text and show it in the console ---
+  // Use this for user-initiated visual actions. Keep sendRawText for background
+  // protocol traffic such as auto-refresh `describe graph`.
+  const sendVisibleCommand = useCallback((text: string) => {
+    if (phase !== 'connected') return;
+    const commandText = text.trim();
+    if (commandText.length === 0) return;
+
+    ctx.appendMessage(wsPath, '> ' + commandText);
+    ctx.send(wsPath, commandText);
+    if (history[0] !== commandText) {
+      setHistory((prev) => [commandText, ...prev].slice(0, MAX_HISTORY));
+    }
+  }, [ctx, wsPath, phase, history, setHistory]);
+
   // --- Console helpers ---
   const copyMessages = useCallback(() => {
     navigator.clipboard.writeText(messages.map((m: { id: number; raw: string }) => m.raw).join('\n'));
@@ -343,6 +360,7 @@ export function useWebSocket({ wsPath, storageKeyHistory, payload, addToast, bus
     clearMessages,
     uploadPayload,
     sendRawText,
+    sendVisibleCommand,
     appendMessage,
     history,
   };

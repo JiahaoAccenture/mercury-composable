@@ -312,7 +312,7 @@ export default function Playground({ config }: PlaygroundProps) {
     }
 
     const command = buildNodeCommand('update', node);
-    ws.sendRawText(command);
+    ws.sendVisibleCommand(command);
     addToast(`Update command sent for "${node.alias}"`, 'info');
     setEditingNode(null);
   }, [ws, addToast]);
