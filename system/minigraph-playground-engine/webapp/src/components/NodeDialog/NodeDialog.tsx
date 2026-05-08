@@ -79,7 +79,7 @@ export default function NodeDialog({
     event.stopPropagation();
   }, []);
 
-  const handleFormSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
+  const handleFormSubmit = useCallback((event: React.SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (controlsDisabled) return;
     onSubmit();
