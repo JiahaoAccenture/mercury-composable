@@ -32,7 +32,7 @@ export interface CreateNodeTextResultEvent extends ProtocolEventBase {
 export interface NodeActionTextResultEvent extends ProtocolEventBase {
   kind: 'minigraph.nodeAction.textResult';
   status: 'accepted' | 'rejected' | 'error';
-  action: 'create-node' | 'edit-node' | 'delete-node' | null;
+  action: 'create-node' | 'edit-node' | 'delete-node' | 'create-connection' | null;
   alias: string | null;
   message: string;
 }

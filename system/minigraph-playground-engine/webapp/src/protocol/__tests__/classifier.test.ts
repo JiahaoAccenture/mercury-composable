@@ -175,4 +175,18 @@ describe('classifier — invariants', () => {
       message: 'node root not found',
     }));
   });
+
+  it('emits connection success as both graph mutation and node-action text result', () => {
+    const events = classifyMessage(1, 'node root connected to mapper');
+    const kinds = events.map(e => e.kind);
+    expect(kinds).toContain('graph.mutation');
+    expect(kinds).toContain('minigraph.nodeAction.textResult');
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: 'minigraph.nodeAction.textResult',
+      status: 'accepted',
+      action: 'create-connection',
+      alias: 'root',
+      message: 'node root connected to mapper',
+    }));
+  });
 });

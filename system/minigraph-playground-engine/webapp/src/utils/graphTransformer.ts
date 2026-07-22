@@ -1,6 +1,7 @@
 import { MarkerType, type Node, type Edge } from '@xyflow/react';
 import type { MinigraphGraphData } from './graphTypes';
 import { getMinigraphNodeShellStyle } from './minigraphNodeTheme';
+import { getConnectionRelationColor } from '../graphActions/connectionRelations';
 
 /** Data bag attached to every ReactFlow node we create. */
 export interface GraphNodeData extends Record<string, unknown> {
@@ -14,6 +15,7 @@ export interface GraphNodeData extends Record<string, unknown> {
   backSourceHandles: GraphHandleData[];
   /** Back-edge target handles — rendered on the RIGHT side (incoming back-edges to this node). */
   backTargetHandles: GraphHandleData[];
+  supportsConnectionAuthoring: boolean;
   minHeight: number;
 }
 
@@ -50,56 +52,8 @@ const EDGE_LABEL_BG       = 'var(--bg-secondary)';          // token: --bg-secon
 const EDGE_HANDLE_GAP     = 24;   // px between adjacent handle anchors on the same side
 const EDGE_HANDLE_PADDING = 32;   // min px from node top/bottom to first/last handle
 
-// Semantic edge-type colors — intentional per-relation accent palette.
-// Matches the same amber/green/purple axis used by NODE_ACCENT above.
-const EDGE_FALLBACK_COLORS = [
-  '#0369a1',   // sky-700
-  '#15803d',   // green-700
-  '#b45309',   // amber-700
-  '#7e22ce',   // purple-700
-  '#b91c1c',   // red-700
-  '#0f766e',   // teal-700
-  '#c2410c',   // orange-700
-  '#a16207',   // yellow-700
-];
-
-// Named relation-type → accent color map.
-const EDGE_COLOR_BY_RELATION: Record<string, string> = {
-  fetch:        '#0369a1',   // sky-700
-  details:      '#0369a1',
-  'ext-call':   '#0369a1',
-  mapping:      '#b45309',   // amber-700
-  compute:      '#b45309',
-  calculate:    '#b45309',
-  evaluate:     '#b45309',
-  fork:         '#7e22ce',   // purple-700
-  join:         '#7e22ce',
-  one:          '#7e22ce',
-  two:          '#6d28d9',   // purple-800
-  three:        '#5b21b6',   // violet-800
-  more:         '#4c1d95',   // violet-900
-  done:         '#15803d',   // green-700
-  complete:     '#15803d',
-  finish:       '#15803d',
-  positive:     '#15803d',
-  negative:     '#b91c1c',   // red-700
-};
-
-function hashString(value: string): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) {
-    hash = ((hash << 5) - hash) + value.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
 function edgeColor(relationTypes: string[]): string {
-  if (relationTypes.length === 0) return EDGE_STROKE;
-  const primary = relationTypes[0].trim().toLowerCase();
-  const known = EDGE_COLOR_BY_RELATION[primary];
-  if (known) return known;
-  return EDGE_FALLBACK_COLORS[hashString(primary) % EDGE_FALLBACK_COLORS.length];
+  return getConnectionRelationColor(relationTypes, EDGE_STROKE);
 }
 
 function edgeSourceHandleId(index: number): string {
@@ -533,8 +487,10 @@ function computeLayout(
  */
 export function transformGraphData(
   data: MinigraphGraphData,
+  options: { supportsConnectionAuthoring?: boolean } = {},
 ): { nodes: Node<GraphNodeData>[]; edges: Edge<GraphEdgeData>[] } {
   const connections = data.connections ?? [];
+  const supportsConnectionAuthoring = options.supportsConnectionAuthoring === true;
 
   // ── Approximate node heights for layout ────────────────────────────────────
   // Count total outgoing/incoming to get rough handle counts.  The layout only
@@ -672,6 +628,7 @@ export function transformGraphData(
         targetHandles,
         backSourceHandles,
         backTargetHandles,
+        supportsConnectionAuthoring,
         minHeight:     nodeHeight,
       },
     };

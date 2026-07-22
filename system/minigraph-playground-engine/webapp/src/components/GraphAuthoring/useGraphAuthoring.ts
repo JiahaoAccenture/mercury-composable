@@ -5,10 +5,13 @@ import type { MinigraphGraphData, MinigraphNode } from '../../utils/graphTypes';
 import type { NodeActionTextResult } from '../../utils/messageParser';
 import type { GraphAuthoringExecutor } from '../../graphActions/graphAuthoringExecutor';
 import {
+  buildCreateConnectionCommand,
   buildCreateNodeCommand,
   buildDeleteNodeCommand,
   buildUpdateNodeCommand,
 } from '../../graphActions/minigraphCommandBuilder';
+import type { ConnectionFormState } from '../../graphActions/connectionAuthoringTypes';
+import { CONNECTION_RELATION_OPTIONS } from '../../graphActions/connectionRelations';
 import type {
   NodeAction,
   NodeFormState,
@@ -16,18 +19,19 @@ import type {
   NodeFormValidationErrors,
 } from '../../graphActions/nodeAuthoringTypes';
 import { createDefaultNodeFormState, createEditNodeFormState } from '../../graphActions/propertyRows';
-import { validateDeleteNodeAlias, validateNodeFormState } from '../../graphActions/validation';
+import { validateConnectionFormState, validateDeleteNodeAlias, validateNodeFormState } from '../../graphActions/validation';
 
 export const DEFAULT_AUTHORING_TIMEOUT_MS = 10_000;
 
 type EditableNodeAction = Extract<NodeAction, 'create-node' | 'edit-node'>;
+type EditableAuthoringAction = Extract<NodeAction, 'create-node' | 'edit-node' | 'create-connection'>;
 type CreateNodeFormSource = Exclude<NodeFormSource, 'edit-node'>;
 type UserMessageType = 'info' | 'success' | 'error';
 
 export type AuthoringState =
   | {
       status: 'closed';
-      pendingSubmit: PendingNodeActionSubmit | null;
+      pendingSubmit: PendingAuthoringSubmit | null;
       serverMessage: string | null;
     }
   | {
@@ -36,14 +40,24 @@ export type AuthoringState =
       phase: 'editing' | 'sending';
       formState: NodeFormState;
       originalAlias: string | null;
-      pendingSubmit: PendingNodeActionSubmit | null;
+      pendingSubmit: PendingAuthoringSubmit | null;
+      serverMessage: string | null;
+      connectionLost: boolean;
+    }
+  | {
+      status: 'open';
+      action: 'create-connection';
+      phase: 'editing' | 'sending';
+      formState: ConnectionFormState;
+      pendingSubmit: PendingAuthoringSubmit | null;
       serverMessage: string | null;
       connectionLost: boolean;
     };
 
-export interface PendingNodeActionSubmit {
+export interface PendingAuthoringSubmit {
   action: NodeAction;
-  alias: string;
+  alias: string | null;
+  targetAlias?: string | null;
   command: string;
   sentAt: string;
 }
@@ -62,29 +76,33 @@ export interface UseGraphAuthoringReturn {
   state: AuthoringState;
   validationErrors: NodeFormValidationErrors;
   openCreateNode: (source: CreateNodeFormSource) => void;
+  openCreateConnection: (sourceAlias: string, targetAlias: string) => void;
   openEditNode: (node: MinigraphNode) => void;
   deleteNode: (node: MinigraphNode) => void;
-  updateFormState: (formState: NodeFormState) => void;
+  updateFormState: (formState: NodeFormState | ConnectionFormState) => void;
   submit: () => void;
   close: () => void;
 }
 
-const PENDING_ACTION_MESSAGE = 'A node action is already pending. Wait for it to finish before starting another.';
+const PENDING_ACTION_MESSAGE = 'A graph authoring action is already pending. Wait for it to finish before starting another.';
 const CREATE_SEND_FAILURE_MESSAGE = 'Could not send the create-node command because the WebSocket is not open. The form values remain in this dialog.';
 const EDIT_SEND_FAILURE_MESSAGE = 'Could not send the edit-node command because the WebSocket is not open. Your changes remain in this dialog.';
 const DELETE_SEND_FAILURE_MESSAGE = 'Could not send the delete-node command because the WebSocket is not open.';
+const CONNECTION_SEND_FAILURE_MESSAGE = 'Could not send the create-connection command because the WebSocket is not open. The form values remain in this dialog.';
 const NODE_UNAVAILABLE_MESSAGE = 'This node is no longer available in the current graph.';
 const CREATE_DISCONNECTED_EDITING_MESSAGE = 'Connection disconnected. Refresh the page and create the node again after the app reconnects.';
 const EDIT_DISCONNECTED_EDITING_MESSAGE = 'Connection disconnected. Refresh the page and edit the node again after the app reconnects.';
-const PENDING_DISCONNECTED_MESSAGE = 'Connection disconnected while the node action was pending. The outcome is unknown. Refresh the page and check the graph before trying again.';
+const CONNECTION_DISCONNECTED_EDITING_MESSAGE = 'Connection disconnected. Refresh the page and create the connection again after the app reconnects.';
+const PENDING_DISCONNECTED_MESSAGE = 'Connection disconnected while the graph authoring action was pending. The outcome is unknown. Refresh the page and check the graph before trying again.';
 
 const CLOSED_STATE: AuthoringState = { status: 'closed', pendingSubmit: null, serverMessage: null };
 
-function getPendingSubmit(state: AuthoringState): PendingNodeActionSubmit | null {
+function getPendingSubmit(state: AuthoringState): PendingAuthoringSubmit | null {
   return state.pendingSubmit;
 }
 
 function getSendFailureMessage(action: NodeAction): string {
+  if (action === 'create-connection') return CONNECTION_SEND_FAILURE_MESSAGE;
   if (action === 'edit-node') return EDIT_SEND_FAILURE_MESSAGE;
   if (action === 'delete-node') return DELETE_SEND_FAILURE_MESSAGE;
   return CREATE_SEND_FAILURE_MESSAGE;
@@ -94,14 +112,14 @@ function getTimeoutMessage(action: NodeAction): string {
   return `The ${action} command was sent, but no backend result was observed yet. The outcome is unknown.`;
 }
 
-function getDisconnectedEditingMessage(action: EditableNodeAction): string {
-  return action === 'edit-node'
-    ? EDIT_DISCONNECTED_EDITING_MESSAGE
-    : CREATE_DISCONNECTED_EDITING_MESSAGE;
+function getDisconnectedEditingMessage(action: EditableAuthoringAction): string {
+  if (action === 'create-connection') return CONNECTION_DISCONNECTED_EDITING_MESSAGE;
+  return action === 'edit-node' ? EDIT_DISCONNECTED_EDITING_MESSAGE : CREATE_DISCONNECTED_EDITING_MESSAGE;
 }
 
-function aliasesMatch(left: string | null, right: string): boolean {
-  return left?.trim().toLowerCase() === right.trim().toLowerCase();
+function aliasesMatch(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false;
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
 
 function findCurrentNodeByAlias(
@@ -113,14 +131,31 @@ function findCurrentNodeByAlias(
 
 function eventMatchesPendingAction(
   event: NodeActionTextResultEvent,
-  pending: PendingNodeActionSubmit,
+  pending: PendingAuthoringSubmit,
 ): boolean {
   if (event.status === 'error') return true;
+
+  if (pending.action === 'create-connection') {
+    if (event.action === 'create-connection') {
+      return event.alias === null || aliasesMatch(event.alias, pending.alias);
+    }
+    if (event.action === null) {
+      return aliasesMatch(event.alias, pending.alias) || aliasesMatch(event.alias, pending.targetAlias);
+    }
+    return false;
+  }
+
   if (!aliasesMatch(event.alias, pending.alias)) return false;
   return event.action === null || event.action === pending.action;
 }
 
-// Owns the complete node-authoring lifecycle: form state, validation,
+function isConnectionFormState(
+  formState: NodeFormState | ConnectionFormState,
+): formState is ConnectionFormState {
+  return 'sourceAlias' in formState;
+}
+
+// Owns the complete graph-authoring lifecycle: form state, validation,
 // raw-command send, text-result matching, timeout handling, and disconnect
 // handling. UI components call this hook instead of sending commands or
 // interpreting backend text themselves.
@@ -209,6 +244,36 @@ export function useGraphAuthoring({
     });
   }, [connected, notifyUser, setAuthoringState]);
 
+  const openCreateConnection = useCallback((sourceAlias: string, targetAlias: string) => {
+    if (!connected) return;
+    if (getPendingSubmit(stateRef.current)) {
+      notifyUser(PENDING_ACTION_MESSAGE, 'error');
+      return;
+    }
+
+    const formState: ConnectionFormState = {
+      sourceAlias,
+      targetAlias,
+      relation: CONNECTION_RELATION_OPTIONS[0],
+    };
+    const validation = validateConnectionFormState(formState, {
+      graphData: graphDataRef.current,
+      connected,
+    });
+    if (!validation.valid) return;
+
+    setValidationErrors({});
+    setAuthoringState({
+      status: 'open',
+      action: 'create-connection',
+      phase: 'editing',
+      formState,
+      pendingSubmit: null,
+      serverMessage: null,
+      connectionLost: false,
+    });
+  }, [connected, notifyUser, setAuthoringState]);
+
   const openEditNode = useCallback((node: MinigraphNode) => {
     if (!connected) {
       notifyUser(EDIT_DISCONNECTED_EDITING_MESSAGE, 'error');
@@ -274,7 +339,7 @@ export function useGraphAuthoring({
       return;
     }
 
-    const pending: PendingNodeActionSubmit = {
+    const pending: PendingAuthoringSubmit = {
       action: 'delete-node',
       alias: node.alias.trim(),
       command,
@@ -285,12 +350,26 @@ export function useGraphAuthoring({
     startSubmitTimer();
   }, [connected, executor, notifyUser, setAuthoringState, startSubmitTimer]);
 
-  const updateFormState = useCallback((formState: NodeFormState) => {
+  const updateFormState = useCallback((formState: NodeFormState | ConnectionFormState) => {
     const current = stateRef.current;
     if (current.status !== 'open') return;
     if (current.phase === 'sending' || current.connectionLost) return;
 
     setValidationErrors({});
+
+    if (current.action === 'create-connection') {
+      if (!isConnectionFormState(formState)) return;
+      setAuthoringState({
+        ...current,
+        formState,
+        pendingSubmit: null,
+        serverMessage: null,
+        connectionLost: false,
+      });
+      return;
+    }
+
+    if (isConnectionFormState(formState)) return;
     setAuthoringState({
       ...current,
       formState,
@@ -315,26 +394,36 @@ export function useGraphAuthoring({
       return;
     }
 
-    const validation = validateNodeFormState(
-      current.formState,
-      action === 'edit-node'
-        ? { mode: 'edit', originalAlias: current.originalAlias }
-        : { graphData: graphDataRef.current },
-    );
+    const validation = current.action === 'create-connection'
+      ? validateConnectionFormState(current.formState, {
+        graphData: graphDataRef.current,
+        connected,
+      })
+      : validateNodeFormState(
+        current.formState,
+        current.action === 'edit-node'
+          ? { mode: 'edit', originalAlias: current.originalAlias }
+          : { graphData: graphDataRef.current },
+      );
     if (!validation.valid) {
       setValidationErrors(validation.errors);
       return;
     }
 
     let command: string;
-    let pendingAlias: string;
+    let pendingAlias: string | null;
+    let pendingTargetAlias: string | null = null;
     try {
-      if (action === 'edit-node') {
+      if (current.action === 'edit-node') {
         pendingAlias = current.originalAlias?.trim() ?? '';
         command = buildUpdateNodeCommand(current.formState, pendingAlias);
-      } else {
+      } else if (current.action === 'create-node') {
         pendingAlias = current.formState.alias.trim();
         command = buildCreateNodeCommand(current.formState);
+      } else {
+        pendingAlias = current.formState.sourceAlias.trim();
+        pendingTargetAlias = current.formState.targetAlias.trim();
+        command = buildCreateConnectionCommand(current.formState);
       }
     } catch (err) {
       setValidationErrors({ command: err instanceof Error ? err.message : String(err) });
@@ -352,9 +441,10 @@ export function useGraphAuthoring({
       return;
     }
 
-    const pending: PendingNodeActionSubmit = {
+    const pending: PendingAuthoringSubmit = {
       action,
       alias: pendingAlias,
+      targetAlias: pendingTargetAlias,
       command,
       sentAt: new Date().toISOString(),
     };
@@ -453,6 +543,7 @@ export function useGraphAuthoring({
     state,
     validationErrors,
     openCreateNode,
+    openCreateConnection,
     openEditNode,
     deleteNode,
     updateFormState,

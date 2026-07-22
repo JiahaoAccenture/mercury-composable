@@ -35,6 +35,7 @@ interface RightPanelProps {
   isConnected:             boolean;
   supportsAuthoring?:      boolean;
   onCreateNode?:           (source: 'empty-graph' | 'pane-context-menu') => void;
+  onCreateConnection?:     (sourceAlias: string, targetAlias: string) => void;
   onEditNode?:             (node: MinigraphNode) => void;
   onDeleteNode?:           (node: MinigraphNode) => void;
   /**
@@ -73,6 +74,7 @@ export default function RightPanel({
   isConnected,
   supportsAuthoring,
   onCreateNode,
+  onCreateConnection,
   onEditNode,
   onDeleteNode,
   helpPanel,
@@ -163,6 +165,7 @@ export default function RightPanel({
               isConnected={isConnected}
               supportsAuthoring={supportsAuthoring}
               onCreateNode={onCreateNode}
+              onCreateConnection={onCreateConnection}
               onEditNode={onEditNode}
               onDeleteNode={onDeleteNode}
             />

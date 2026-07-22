@@ -537,6 +537,7 @@ export default function Playground({ config }: PlaygroundProps) {
             isConnected={ws.connected}
             supportsAuthoring={supportsAuthoring}
             onCreateNode={supportsAuthoring ? graphAuthoring.openCreateNode : undefined}
+            onCreateConnection={supportsAuthoring ? graphAuthoring.openCreateConnection : undefined}
             onEditNode={supportsAuthoring ? graphAuthoring.openEditNode : undefined}
             onDeleteNode={supportsAuthoring ? graphAuthoring.deleteNode : undefined}
             helpPanel={supportsHelp && helpOpen ? (

@@ -9,10 +9,14 @@ import {
   BackgroundVariant,
   type Edge,
   type Node,
+  type IsValidConnection,
+  type OnConnect,
+  type OnConnectStart,
+  type OnConnectEnd,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { nodeTypes } from './NodeTypes';
+import { AUTHORING_SOURCE_HANDLE_ID, AUTHORING_TARGET_HANDLE_ID, nodeTypes } from './NodeTypes';
 import { GraphViewErrorBoundary } from './GraphViewErrorBoundary';
 import { transformGraphData, type GraphNodeData, type GraphEdgeData } from '../../utils/graphTransformer';
 import type { MinigraphGraphData, MinigraphNode, MinigraphConnection } from '../../utils/graphTypes';
@@ -40,6 +44,7 @@ interface GraphViewProps {
   isConnected:     boolean;
   supportsAuthoring?: boolean;
   onCreateNode?:   (source: 'empty-graph' | 'pane-context-menu') => void;
+  onCreateConnection?: (sourceAlias: string, targetAlias: string) => void;
   onEditNode?:     (node: MinigraphNode) => void;
   onDeleteNode?:   (node: MinigraphNode) => void;
 }
@@ -59,6 +64,7 @@ export default function GraphView({
   isConnected,
   supportsAuthoring = false,
   onCreateNode,
+  onCreateConnection,
   onEditNode,
   onDeleteNode,
 }: GraphViewProps) {
@@ -73,6 +79,7 @@ export default function GraphView({
   const [clipboardDragActive, setClipboardDragActive] = useState(false);
   const clipboardDragDepthRef = useRef(0);
   const canCreateNode = Boolean(supportsAuthoring && onCreateNode && isConnected);
+  const canCreateConnection = Boolean(supportsAuthoring && onCreateConnection && isConnected);
   const canClipNode = Boolean(onClipNode);
   const canEditNode = Boolean(supportsAuthoring && onEditNode && isConnected);
   const canDeleteNode = Boolean(supportsAuthoring && onDeleteNode && isConnected);
@@ -122,7 +129,9 @@ export default function GraphView({
   const { nodes: initialNodes, edges: initialEdges, transformError } = useMemo(() => {
     if (!graphData) return { nodes: EMPTY_NODES, edges: EMPTY_EDGES, transformError: null };
     try {
-      const result = transformGraphData(graphData);
+      const result = transformGraphData(graphData, {
+        supportsConnectionAuthoring: canCreateConnection,
+      });
       return { ...result, transformError: null };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -131,7 +140,7 @@ export default function GraphView({
       // useEffect below, which fires the callback safely after the render cycle.
       return { nodes: EMPTY_NODES, edges: EMPTY_EDGES, transformError: message };
     }
-  }, [graphData]);
+  }, [canCreateConnection, graphData]);
 
   // Fire the render-error callback whenever the transform produces a new error.
   // A useEffect is the correct place for side-effects that react to derived state.
@@ -151,6 +160,7 @@ export default function GraphView({
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<GraphNodeData>>(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<GraphEdgeData>>(initialEdges);
+  const connectionDragSourceRef = useRef<string | null>(null);
 
   // Re-sync whenever the upstream graphData changes
   useEffect(() => {
@@ -198,9 +208,39 @@ export default function GraphView({
   };
 
   const hasGraphData = Boolean(graphData && graphData.nodes.length > 0);
+  const graphNodeAliases = useMemo(
+    () => new Set(graphData?.nodes.map((node) => node.alias) ?? []),
+    [graphData],
+  );
   const contextNode = contextMenu && graphData
     ? findNodeByAlias(graphData, contextMenu.nodeAlias)
     : null;
+
+  const isConnectionValid = useCallback<IsValidConnection>((connection) => {
+    if (!canCreateConnection) return false;
+    if (!connection.source || !connection.target) return false;
+    if (connection.source === connection.target) return false;
+    if (!graphNodeAliases.has(connection.source) || !graphNodeAliases.has(connection.target)) return false;
+    return connection.sourceHandle === AUTHORING_SOURCE_HANDLE_ID &&
+      connection.targetHandle === AUTHORING_TARGET_HANDLE_ID;
+  }, [canCreateConnection, graphNodeAliases]);
+
+  const handleConnect = useCallback<OnConnect>((connection) => {
+    if (!isConnectionValid(connection)) return;
+    if (!connection.source || !connection.target) return;
+    onCreateConnection?.(connection.source, connection.target);
+  }, [isConnectionValid, onCreateConnection]);
+
+  const handleConnectStart = useCallback<OnConnectStart>((_event, params) => {
+    if (params.handleId !== AUTHORING_SOURCE_HANDLE_ID || params.handleType !== 'source') return;
+    connectionDragSourceRef.current = params.nodeId;
+    setContextMenu(null);
+    setPaneMenu(null);
+  }, []);
+
+  const handleConnectEnd = useCallback<OnConnectEnd>(() => {
+    connectionDragSourceRef.current = null;
+  }, []);
 
   if (transformError) {
     return (
@@ -242,6 +282,13 @@ export default function GraphView({
               edges={edges}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
+              nodesConnectable={canCreateConnection}
+              edgesReconnectable={false}
+              connectOnClick={false}
+              isValidConnection={isConnectionValid}
+              onConnect={handleConnect}
+              onConnectStart={handleConnectStart}
+              onConnectEnd={handleConnectEnd}
               nodeTypes={nodeTypes}
               fitView
               fitViewOptions={{ padding: 0.25 }}

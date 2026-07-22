@@ -292,7 +292,12 @@ export type MutationKind = 'node-mutation' | 'import-graph';
 
 export type CreateNodeTextResultStatus = 'accepted' | 'rejected' | 'error';
 export type NodeActionTextResultStatus = 'accepted' | 'rejected' | 'error';
-export type NodeActionTextResultAction = 'create-node' | 'edit-node' | 'delete-node' | null;
+export type NodeActionTextResultAction =
+  | 'create-node'
+  | 'edit-node'
+  | 'delete-node'
+  | 'create-connection'
+  | null;
 
 export interface CreateNodeTextResult {
   status: CreateNodeTextResultStatus;
@@ -311,7 +316,10 @@ export const NODE_CREATED_RE = /^node ([A-Za-z0-9_-]+) created$/i;
 export const NODE_ALREADY_EXISTS_RE = /^node ([A-Za-z0-9_-]+) already exists$/i;
 export const NODE_UPDATED_RE = /^node ([A-Za-z0-9_-]+) updated$/i;
 export const NODE_DELETED_RE = /^node ([A-Za-z0-9_-]+) deleted$/i;
+export const NODE_CONNECTED_RE = /^node ([A-Za-z0-9_-]+) connected to ([A-Za-z0-9_-]+)$/i;
 export const NODE_NOT_FOUND_RE = /^node ([A-Za-z0-9_-]+) not found$/i;
+export const CONNECT_SELF_RE = /^Source and target nodes must be different$/i;
+export const CONNECT_SYNTAX_RE = /^Syntax: connect \{node-A\} to \{node-B\} with \{relation\}$/i;
 export const ERROR_RE = /^ERROR: (.+)$/;
 
 export function parseNodeActionTextResult(raw: string): NodeActionTextResult | null {
@@ -338,9 +346,18 @@ export function parseNodeActionTextResult(raw: string): NodeActionTextResult | n
     return { status: 'accepted', action: 'delete-node', alias: deleted[1], message: text };
   }
 
+  const connected = text.match(NODE_CONNECTED_RE);
+  if (connected) {
+    return { status: 'accepted', action: 'create-connection', alias: connected[1], message: text };
+  }
+
   const notFound = text.match(NODE_NOT_FOUND_RE);
   if (notFound) {
     return { status: 'rejected', action: null, alias: notFound[1], message: text };
+  }
+
+  if (CONNECT_SELF_RE.test(text) || CONNECT_SYNTAX_RE.test(text)) {
+    return { status: 'rejected', action: 'create-connection', alias: null, message: text };
   }
 
   const error = text.match(ERROR_RE);
