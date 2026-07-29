@@ -57,6 +57,7 @@ describe('parseNodeActionTextResult', () => {
       status: 'accepted',
       action: 'create-connection',
       alias: 'root',
+      targetAlias: 'mapper',
       message: 'node root connected to mapper',
     });
   });

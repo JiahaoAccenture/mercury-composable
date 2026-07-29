@@ -1,7 +1,7 @@
 # Epic 5 Visual Edge Connection UI Spec
 
-**Audience:** frontend and full-stack engineers implementing visual connection authoring in the Minigraph playground  
-**Status:** implementation-ready  
+**Audience:** frontend and full-stack engineers implementing visual connection authoring in the Minigraph playground
+**Status:** implemented and verified
 **Scope:** Minigraph playground graph UI only
 
 ---
@@ -192,6 +192,8 @@ Add a separate pair of authoring handles per node:
 
 - one source handle for outbound connection drags;
 - one target handle for inbound drops;
+- the source handle may start but not receive a connection;
+- the target handle may receive but not start a connection;
 - stable handle IDs, for example `authoring-source` and `authoring-target`;
 - rendered only when visual authoring is enabled, or rendered inert when disabled;
 - visually styled as the hover connection affordance rather than tiny dots;
@@ -214,7 +216,7 @@ Backend remains authoritative and may reject stale graph data.
 
 ### 5.4 Command Contract
 
-Producer: frontend graph authoring command builder  
+Producer: frontend graph authoring command builder
 Consumer: `GraphCommandService.handleConnectCommand`
 
 ```text
@@ -268,11 +270,12 @@ as:
   status: 'accepted',
   action: 'create-connection',
   alias: sourceAlias,
+  targetAlias,
   message: rawText,
 }
 ```
 
-The existing graph mutation detector already treats `node ... connected to ...` as `node-mutation`, so auto-refresh remains the graph synchronization mechanism.
+Pending connection success is resolved only when both `alias` and `targetAlias` match the submitted source and target. This prevents an unrelated same-source result from closing the modal. The existing graph mutation detector already treats `node ... connected to ...` as `node-mutation`, so auto-refresh remains the graph synchronization mechanism.
 
 ### 5.6 State Ownership
 
@@ -348,8 +351,8 @@ Files:
 Work:
 
 - extend parser action union with `create-connection`;
-- parse backend success text for connection creation;
-- extend authoring lifecycle to open connection modal, submit, match result, timeout, and disconnect;
+- parse backend success text with both source and target aliases;
+- extend authoring lifecycle to open connection modal, submit, match both endpoints, timeout, and disconnect;
 - preserve the single pending authoring action rule across node and connection actions.
 
 Tests:
@@ -357,6 +360,7 @@ Tests:
 - parser recognizes `node root connected to mapper`;
 - classifier emits both `graph.mutation` and `minigraph.nodeAction.textResult` for accepted connection creation;
 - pending lifecycle handles accepted, rejected, timeout, disconnect, and send-false paths.
+- a success for the same source but a different target does not resolve the pending connection.
 
 Rollback:
 
@@ -403,6 +407,7 @@ Work:
 
 - pass `supportsConnectionAuthoring` or equivalent into graph node data;
 - render authoring source/target handles separately from existing edge handles;
+- allow drags to start only from source handles and end only on target handles;
 - style hover outline and authoring handle area as a border-aligned affordance with minimal side indicators;
 - add `onConnect`, `onConnectStart`, `onConnectEnd`, and `isValidConnection`;
 - call `graphAuthoring.openCreateConnection(sourceAlias, targetAlias)` on valid connect;
@@ -441,6 +446,7 @@ Rollback:
 | Drop on empty canvas | No modal, no toast | Draft discarded |
 | Drop on invalid target | No modal, no toast | Draft discarded |
 | Concurrent authoring action pending | Toast asks user to wait | Existing pending action remains owner |
+| Unrelated success for the same source and a different target | No modal/state change | Existing pending action remains owner |
 
 ---
 
@@ -517,12 +523,14 @@ Automated tests:
   - accepted connection creation parsing.
 - `webapp/src/protocol/__tests__/classifier.test.ts`
   - connection success emits mutation and node-action result events.
-- new hook tests where practical for connection pending lifecycle, matching existing authoring patterns.
+- `webapp/src/components/GraphAuthoring/useGraphAuthoring.test.ts`
+  - accepted/rejected, exact endpoint matching, timeout, disconnect, and send-false lifecycle paths.
 
 Build checks:
 
 ```bash
 npm run test
+npm run typecheck
 npm run build
 ```
 
@@ -530,17 +538,18 @@ Manual QA:
 
 1. Hover a node and confirm the connection outline sits on the node border without layout shift or broad translucent side blocks.
 2. Drag from source node to target node and confirm modal opens.
-3. Confirm the enabled Relation select uses normal editable text/background styling, while read-only Source/Target remain visually muted.
-4. Select each relation category type and confirm command submit for at least one relation.
-5. Drop connection on empty canvas and confirm no modal opens.
-6. Try same-node connection and confirm it is blocked.
-7. Confirm node resize still works.
-8. Confirm right-click node context menu still works.
-9. Confirm pane context menu still works.
-10. Confirm clipboard drag/drop still works.
-11. Confirm pan, zoom, minimap, and refresh overlay still work.
-12. Disconnect WebSocket and confirm affordance disappears.
-13. Disconnect while modal is open or pending and confirm user-visible failure state.
+3. Try to start a drag from a target handle and confirm no modal opens.
+4. Confirm the enabled Relation select uses normal editable text/background styling, while read-only Source/Target remain visually muted.
+5. Select each relation category type and confirm command submit for at least one relation.
+6. Drop connection on empty canvas and confirm no modal opens.
+7. Try same-node connection and confirm it is blocked.
+8. Confirm node resize still works.
+9. Confirm right-click node context menu still works.
+10. Confirm pane context menu still works.
+11. Confirm clipboard drag/drop still works.
+12. Confirm pan, zoom, minimap, and refresh overlay still work.
+13. Disconnect WebSocket and confirm affordance disappears.
+14. Disconnect while modal is open or pending and confirm user-visible failure state.
 
 ---
 
@@ -556,7 +565,7 @@ Manual QA:
 
 ---
 
-## Appendix - Planning Artifact (from /spec-plan)
+## Appendix - UI Loop Engineer Planning Artifact
 
 **Phase 0 - Domain calibration**
 - Domain mix: Frontend UI / rendering 45%, State management / data flow 25%, Product workflow / UX 20%, Network protocol / RPC 10%.

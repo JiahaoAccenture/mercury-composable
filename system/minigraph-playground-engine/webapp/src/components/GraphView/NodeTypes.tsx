@@ -79,6 +79,7 @@ function MinigraphNode({ data, isConnectable, selected }: NodeProps<MinigraphRFN
             type="source"
             position={Position.Right}
             isConnectable={isConnectable}
+            isConnectableEnd={false}
             className={`${styles.authoringHandle} ${styles.authoringSourceHandle}`}
           />
           <Handle
@@ -86,6 +87,7 @@ function MinigraphNode({ data, isConnectable, selected }: NodeProps<MinigraphRFN
             type="target"
             position={Position.Left}
             isConnectable={isConnectable}
+            isConnectableStart={false}
             className={`${styles.authoringHandle} ${styles.authoringTargetHandle}`}
           />
         </>

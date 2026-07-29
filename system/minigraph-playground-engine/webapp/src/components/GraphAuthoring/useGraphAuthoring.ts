@@ -137,7 +137,11 @@ function eventMatchesPendingAction(
 
   if (pending.action === 'create-connection') {
     if (event.action === 'create-connection') {
-      return event.alias === null || aliasesMatch(event.alias, pending.alias);
+      if (event.alias === null) return true;
+      if (!aliasesMatch(event.alias, pending.alias)) return false;
+      return event.status === 'accepted'
+        ? aliasesMatch(event.targetAlias, pending.targetAlias)
+        : event.targetAlias === null || aliasesMatch(event.targetAlias, pending.targetAlias);
     }
     if (event.action === null) {
       return aliasesMatch(event.alias, pending.alias) || aliasesMatch(event.alias, pending.targetAlias);
@@ -147,6 +151,116 @@ function eventMatchesPendingAction(
 
   if (!aliasesMatch(event.alias, pending.alias)) return false;
   return event.action === null || event.action === pending.action;
+}
+
+export interface AuthoringTransition {
+  state: AuthoringState;
+  acceptedResult?: NodeActionTextResult;
+  notification?: {
+    message: string;
+    type: UserMessageType;
+  };
+}
+
+export function resolvePendingAuthoringEvent(
+  current: AuthoringState,
+  event: NodeActionTextResultEvent,
+): AuthoringTransition | null {
+  const pending = getPendingSubmit(current);
+  if (!pending || !eventMatchesPendingAction(event, pending)) return null;
+
+  if (event.status === 'accepted') {
+    return {
+      state: CLOSED_STATE,
+      acceptedResult: {
+        status: event.status,
+        action: event.action,
+        alias: event.alias,
+        targetAlias: event.targetAlias,
+        message: event.message,
+      },
+    };
+  }
+
+  if (current.status === 'open') {
+    return {
+      state: {
+        ...current,
+        phase: 'editing',
+        pendingSubmit: null,
+        serverMessage: event.status === 'error'
+          ? `Backend returned an error while this submit was pending: ${event.message}`
+          : event.message,
+      },
+    };
+  }
+
+  return {
+    state: CLOSED_STATE,
+    notification: { message: event.message, type: 'error' },
+  };
+}
+
+export function resolveAuthoringSendFailure(
+  current: Extract<AuthoringState, { status: 'open' }>,
+): Extract<AuthoringState, { status: 'open' }> {
+  return {
+    ...current,
+    phase: 'editing',
+    pendingSubmit: null,
+    serverMessage: getSendFailureMessage(current.action),
+  };
+}
+
+export function resolveAuthoringTimeout(
+  current: AuthoringState,
+): AuthoringTransition | null {
+  const pending = getPendingSubmit(current);
+  if (!pending) return null;
+
+  const message = getTimeoutMessage(pending.action);
+  if (current.status === 'open') {
+    return {
+      state: {
+        ...current,
+        phase: 'editing',
+        pendingSubmit: null,
+        serverMessage: message,
+      },
+    };
+  }
+
+  return {
+    state: CLOSED_STATE,
+    notification: { message, type: 'error' },
+  };
+}
+
+export function resolveAuthoringDisconnect(
+  current: AuthoringState,
+): AuthoringTransition | null {
+  const pending = getPendingSubmit(current);
+
+  if (current.status === 'open') {
+    const message = pending
+      ? PENDING_DISCONNECTED_MESSAGE
+      : getDisconnectedEditingMessage(current.action);
+    return {
+      state: {
+        ...current,
+        phase: 'editing',
+        pendingSubmit: null,
+        serverMessage: message,
+        connectionLost: true,
+      },
+    };
+  }
+
+  if (!pending) return null;
+  return {
+    state: CLOSED_STATE,
+    notification: { message: PENDING_DISCONNECTED_MESSAGE, type: 'error' },
+  };
 }
 
 function isConnectionFormState(
@@ -204,20 +318,11 @@ export function useGraphAuthoring({
   const startSubmitTimer = useCallback(() => {
     clearPendingTimer();
     timeoutRef.current = setTimeout(() => {
-      const current = stateRef.current;
-      const pending = getPendingSubmit(current);
-      if (!pending) return;
-
-      if (current.status === 'open') {
-        setAuthoringState({
-          ...current,
-          phase: 'editing',
-          pendingSubmit: null,
-          serverMessage: getTimeoutMessage(pending.action),
-        });
-      } else {
-        setAuthoringState(CLOSED_STATE);
-        notifyUser(getTimeoutMessage(pending.action), 'error');
+      const transition = resolveAuthoringTimeout(stateRef.current);
+      if (!transition) return;
+      setAuthoringState(transition.state);
+      if (transition.notification) {
+        notifyUser(transition.notification.message, transition.notification.type);
       }
       timeoutRef.current = null;
     }, timeoutMs);
@@ -420,10 +525,13 @@ export function useGraphAuthoring({
       } else if (current.action === 'create-node') {
         pendingAlias = current.formState.alias.trim();
         command = buildCreateNodeCommand(current.formState);
-      } else {
+      } else if (isConnectionFormState(current.formState)) {
         pendingAlias = current.formState.sourceAlias.trim();
         pendingTargetAlias = current.formState.targetAlias.trim();
         command = buildCreateConnectionCommand(current.formState);
+      } else {
+        setValidationErrors({ command: 'Invalid connection form state.' });
+        return;
       }
     } catch (err) {
       setValidationErrors({ command: err instanceof Error ? err.message : String(err) });
@@ -432,12 +540,7 @@ export function useGraphAuthoring({
 
     const sent = executor.execute(command);
     if (!sent) {
-      setAuthoringState({
-        ...current,
-        phase: 'editing',
-        pendingSubmit: null,
-        serverMessage: getSendFailureMessage(action),
-      });
+      setAuthoringState(resolveAuthoringSendFailure(current));
       return;
     }
 
@@ -470,36 +573,17 @@ export function useGraphAuthoring({
 
   useEffect(() => {
     return bus.on('minigraph.nodeAction.textResult', (event: NodeActionTextResultEvent) => {
-      const current = stateRef.current;
-      const pending = getPendingSubmit(current);
-      if (!pending || !eventMatchesPendingAction(event, pending)) return;
+      const transition = resolvePendingAuthoringEvent(stateRef.current, event);
+      if (!transition) return;
 
       clearPendingTimer();
-
-      if (event.status === 'accepted') {
-        setValidationErrors({});
-        setAuthoringState(CLOSED_STATE);
-        onAcceptedRef.current?.({
-          status: event.status,
-          action: event.action,
-          alias: event.alias,
-          message: event.message,
-        });
-        return;
+      if (transition.acceptedResult) setValidationErrors({});
+      setAuthoringState(transition.state);
+      if (transition.acceptedResult) {
+        onAcceptedRef.current?.(transition.acceptedResult);
       }
-
-      if (current.status === 'open') {
-        setAuthoringState({
-          ...current,
-          phase: 'editing',
-          pendingSubmit: null,
-          serverMessage: event.status === 'error'
-            ? `Backend returned an error while this submit was pending: ${event.message}`
-            : event.message,
-        });
-      } else {
-        setAuthoringState(CLOSED_STATE);
-        notifyUser(event.message, 'error');
+      if (transition.notification) {
+        notifyUser(transition.notification.message, transition.notification.type);
       }
     });
   }, [bus, clearPendingTimer, notifyUser, setAuthoringState]);
@@ -509,25 +593,13 @@ export function useGraphAuthoring({
   // the user must refresh before trying the action again.
   useEffect(() => {
     if (wasConnectedRef.current && !connected) {
-      const current = stateRef.current;
-      const pending = getPendingSubmit(current);
-
-      if (current.status === 'open') {
+      const transition = resolveAuthoringDisconnect(stateRef.current);
+      if (transition) {
         clearPendingTimer();
-        const message = pending
-          ? PENDING_DISCONNECTED_MESSAGE
-          : getDisconnectedEditingMessage(current.action);
-        setAuthoringState({
-          ...current,
-          phase: 'editing',
-          pendingSubmit: null,
-          serverMessage: message,
-          connectionLost: true,
-        });
-      } else if (pending) {
-        clearPendingTimer();
-        setAuthoringState(CLOSED_STATE);
-        notifyUser(PENDING_DISCONNECTED_MESSAGE, 'error');
+        setAuthoringState(transition.state);
+        if (transition.notification) {
+          notifyUser(transition.notification.message, transition.notification.type);
+        }
       }
     }
     wasConnectedRef.current = connected;

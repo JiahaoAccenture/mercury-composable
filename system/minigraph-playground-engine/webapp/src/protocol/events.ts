@@ -34,6 +34,7 @@ export interface NodeActionTextResultEvent extends ProtocolEventBase {
   status: 'accepted' | 'rejected' | 'error';
   action: 'create-node' | 'edit-node' | 'delete-node' | 'create-connection' | null;
   alias: string | null;
+  targetAlias: string | null;
   message: string;
 }
 

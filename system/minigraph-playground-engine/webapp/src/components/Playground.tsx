@@ -308,9 +308,11 @@ export default function Playground({ config }: PlaygroundProps) {
   // isolated per playground (e.g. "minigraph-saved-graphs" →
   // "minigraph-untitled-counter").  When there is no saved-graphs key the hook
   // is still instantiated but is effectively unused (the save button is hidden).
-  const { defaultName: graphSaveName, setLastSavedName, resetName: resetSaveName } = useGraphSaveName(
+  const { defaultName: graphSaveName, savedName: graphSavedName, resetName: resetSaveName } = useGraphSaveName(
     storageKeySavedGraphs ? `${storageKeySavedGraphs}-untitled-counter` : 'untitled-counter',
     bus,
+    ws.connected,
+    ws.connectionEpoch,
   );
 
   // ── Resolved graph display name ────────────────────────────────────────────
@@ -345,8 +347,7 @@ export default function Playground({ config }: PlaygroundProps) {
     bus,
     connected:    ws.connected,
     sendRawText:  ws.sendRawText,
-    saveGraph:    savedGraphs.saveGraph,
-    setLastSavedName,
+    saveGraph:    storageKeySavedGraphs ? savedGraphs.saveGraph : null,
     addToast,
   });
 
@@ -417,6 +418,7 @@ export default function Playground({ config }: PlaygroundProps) {
             <GraphSaveButton
               disabled={!graphData}
               defaultName={graphSaveName}
+              savedName={graphSavedName}
               onSave={handleSaveGraph}
               nameExists={savedGraphs.hasGraph}
               connected={ws.connected}

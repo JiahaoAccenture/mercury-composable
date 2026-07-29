@@ -152,6 +152,7 @@ export function classifyMessage(msgId: number, raw: string): ProtocolEvent[] {
       status: nodeActionResult.status,
       action: nodeActionResult.action,
       alias: nodeActionResult.alias,
+      targetAlias: nodeActionResult.targetAlias,
       message: nodeActionResult.message,
     });
   }
