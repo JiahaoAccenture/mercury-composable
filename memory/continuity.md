@@ -16,9 +16,9 @@
 - **status:** active, mature framework (Maven reactor)
 - **repo:** github.com/Accenture/mercury-composable (official — source of truth)
 - **last_enabled:** 2026-06-20
-- **last_session:** 2026-07-07 | agent: Claude Code (2026-07-07-163607)
-- **last_review:** 2026-07-07 | through 2026-07-07-163607.md
-- **last_invariant_check:** 2026-06-29 | 2026-06-29-223651.md (re-verify prompted — cadence reset; pending Eric via Open Thread thread-reverify-invariants-2026q2)
+- **last_session:** 2026-07-30 | agent: Codex (2026-07-30-145521)
+- **last_review:** 2026-07-30 | through 2026-07-30-145521.md
+- **last_invariant_check:** 2026-07-30 | 2026-07-30-145521.md (re-verify re-prompted — cadence reset; pending Eric via Open Thread thread-reverify-invariants-2026q2)
 
 > This agent-memory layer was seeded on 2026-06-20 from a prior prototyping
 > environment, carrying forward only the confirmed Vision + Blueprint and the
@@ -63,6 +63,16 @@
 
 ## Key Decisions
 
+- **MiniGraph Graph View automatic layout is crossing-aware (2026-07-30, branch
+  `edge-crossing-issue-fix`).** `transformGraphData` preserves the existing left-to-right ranks,
+  component/orphan policy, Bezier renderer, and graph semantics while applying deterministic
+  barycentric ordering, capped virtual long-edge slots, bounded local insertion search, and actual
+  forward-Bezier/node-body scoring. Work caps deliberately degrade pathological graphs to
+  best-effort ordering; non-planar/cyclic graphs and post-render manual movement are not promised
+  zero crossings. The delivery contract and verification evidence live in
+  `webapp/docs/Graph Edge Crossing Minimization Spec.md`.
+  <!-- id: minigraph-crossing-aware-layout | created: 2026-07-30 | last_used: 2026-07-30 | uses: 1 | tier: working | origin: 2026-07-30-145521 -->
+
 - **Release 4.7.0 — SHIPPED 2026-07-08 (tag `v4.7.0` on merge commit `e41a20b7`; PRs #146 feature +
   #147 bump).** Feature release: **MiniGraph `graph.task` skill** — a Task node invokes any composable
   function (`@PreLoad` route) with Event Script style `input[]`/`output[]` mapping (`*` whole-body
@@ -97,7 +107,7 @@
   #144 bump) — maintenance on top of 4.6.2: final smell suppressions, model encapsulation,
   playground `random` → SecureRandom. All caveats above still apply. Field Sonar dashboard: gate PASSED,
   0 vuln / 0 bugs / smells rating A; only the CryptoApi DSA hotspot awaits "Safe" review in the Sonar UI.
-  <!-- id: release-4-6-2-shipped | created: 2026-07-07 | last_used: 2026-07-08 | uses: 3 | tier: active | origin: 2026-07-07-163607 -->
+  <!-- id: release-4-6-2-shipped | created: 2026-07-07 | last_used: 2026-07-08 | uses: 4 | tier: archive-candidate | origin: 2026-07-07-163607 -->
 
 - **Release 4.6.1 — security + maintenance patch on top of 4.6.0 (2026-07-06, branch `chore/release-4.6.1`,
   Claude Code).** 4.6.0 was already GitHub-released (tag `v4.6.0`, immutable); rather than recall/re-tag it,
@@ -432,15 +442,16 @@
   superseded, not the Copilot review.)
   <!-- id: thread-redis-kafka-rpc | created: 2026-06-24 | last_used: 2026-06-27 | uses: 6 | tier: working -->
 
-- [ ] **Re-verify invariants (due — 50 sessions since the last check ≥ verify_invariants_every 40).** Raised by
-  the 2026-06-29 review (cadence). Confirm each never-decay fact still holds, or supersede any that don't
+- [ ] **Re-verify invariants (still pending; re-prompted 2026-07-30 after another 77 sessions ≥
+  verify_invariants_every 40).** Raised by the 2026-06-29 review and retained as the single human gate
+  by the 2026-07-30 review. Confirm each never-decay fact still holds, or supersede any that don't
   (`DECAY.md` §9 — the review never auto-invalidates):
   core stack — `stack-language-java21`, `stack-build-maven`, `stack-integration-spring`,
   `stack-messaging-kafka`, `stack-ci-gha`; architectural invariants — `functions-decoupled-routes`,
   `typed-io-map-or-pojo`, `virtual-threads-rpc`; core gotchas/decisions — `trace-thread-keyed-mono-gotcha`,
   `instant-serialization`, `kafka-mesh-opt-in`, `event-script-over-code`, `conv-add-capability`,
   `conv-serialization-gotchas`; and the **Vision** (`memory/vision.md`). Check off when re-confirmed.
-  <!-- id: thread-reverify-invariants-2026q2 | created: 2026-06-29 | last_used: 2026-06-29 | uses: 1 | tier: working -->
+  <!-- id: thread-reverify-invariants-2026q2 | created: 2026-06-29 | last_used: 2026-07-30 | uses: 2 | tier: working -->
 
 ## User Preferences
 
