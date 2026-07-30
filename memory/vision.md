@@ -1,6 +1,7 @@
 # Vision — mercury-composable
 
-> Confirmed by maintainer (Eric Law) on 2026-06-20. North star for the VBDI loop;
+> Confirmed by maintainer (Eric Law) on 2026-06-20; re-confirmed 2026-07-27 (invariant
+> re-verification walkthrough). North star for the VBDI loop;
 > tier `core`, re-confirmed on the invariant-verification cadence. The Blueprint
 > (gap from Current State to here) lives as `(blueprint)` Open Threads in continuity.md.
 >
@@ -26,16 +27,19 @@ the one below:
   functions; orchestration is ~50% config / 50% code.
 - **Semantic — Active Knowledge Graph (MiniGraph).** Graph models that *execute* behavior via
   skills embedded on nodes during traversal — zero imperative code for the common case.
-  Realized today: the `graph.executor` engine, 7 built-in skills (`graph.math`,
-  `graph.data.mapper`, `graph.js`, `graph.api.fetcher`, `graph.extension`, `graph.island`,
-  `graph.join`), REST execution at `/api/graph/{graph-id}`, a React/Vite Playground UI, and a
+  Realized today: the `graph.executor` engine, 10 built-in skills (`graph.math`,
+  `graph.data.mapper`, `graph.js`, `graph.api.fetcher`, `graph.task`, `graph.extension`,
+  `graph.suspend`, `graph.resume`, `graph.island`, `graph.join` — incl. workflow suspension
+  with pluggable external state stores), gated REST execution at `/api/graph/{graph-id}`
+  (CompileGraph manifest = the deployment quality gate), a React/Vite Playground UI, and a
   WebSocket session model.
 - **Collaboration — AI companion (early).** A dev-only `POST /api/companion/{id}` endpoint lets
   an external agent (incl. a Claude session) drive Playground commands into a live session. No
   LLM backend is integrated in-repo yet; today the "AI" is an external session following a
   documented prompt.
 
-**Type:** Multi-module Java 21 framework / SDK (Maven reactor, `com.accenture.mercury` v4.6.1).
+**Type:** Multi-module Java 21 framework / SDK (Maven reactor, `com.accenture.mercury` v4.10.6;
+official Rust port in lock-step at the same version).
 
 ## What it should become  *(TARGET)*
 

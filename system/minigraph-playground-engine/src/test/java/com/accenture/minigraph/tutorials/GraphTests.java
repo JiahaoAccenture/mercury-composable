@@ -310,6 +310,80 @@ class GraphTests {
         log.info("High frequency detected");
     }
 
+    @SuppressWarnings("unchecked")
+    @Test
+    void joinBarrierWaitsForRetryingBranch() throws TimeoutException {
+        // Join + RESET interplay: a join barrier must not count a branch whose
+        // skill FAILED into its exception= route (skillRun is success-only), and
+        // RESET clears the completion mark with the guard and state. Branch A
+        // fails on the exception flag and retries through pause (300 ms) ->
+        // recover-a while branch B reaches the join first - before the fix, the
+        // join fired prematurely off the failed-run mark and silently lost
+        // branch A from the output.
+        var result = runGraph("unit-test-join-retry", Map.of("person_id", 100, "exception", true));
+        assertInstanceOf(Map.class, result);
+        var mm = new MultiLevelMap((Map<String, Object>) result);
+        assertEquals("Peter", mm.getElement("a-name"));
+        assertEquals("B", mm.getElement("b"));
+        log.info("Join barrier waits for a retrying branch");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void chainedJoinCountsOnlyAFiredUpstreamJoin() throws TimeoutException {
+        // Chained joins: an upstream join that evaluated and SANK is still in
+        // skillRun (its skill ran fine), so the downstream join must judge it
+        // by the OUTCOME it recorded, not the run mark. Topology: slow-pre at
+        // 200 ms feeds slow-x, and together with fast-y they feed j-one, which
+        // chains into j-two alongside pace-z at 100 ms. Timing: fast-y makes
+        // j-one evaluate-and-sink at about 1 ms while pace-z reaches j-two at
+        // about 100 ms. Before the fix, j-two counted the sunk j-one off its
+        // run mark, fired prematurely, and lost branch X.
+        var result = runGraph("unit-test-join-chain", Map.of("probe", true));
+        assertInstanceOf(Map.class, result);
+        var mm = new MultiLevelMap((Map<String, Object>) result);
+        assertEquals("X", mm.getElement("x"));
+        assertEquals("Y", mm.getElement("y"));
+        assertEquals("Z", mm.getElement("z"));
+        log.info("Chained join counts only a fired upstream join");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fetcherCacheKeyUsesDictionaryDeclaredInputsOnly() throws TimeoutException {
+        // Parity guard (finding F6, mirrored in the Rust port): the provider cache key
+        // is built from the DICTIONARY-DECLARED inputs only. Two fetchers call the same
+        // provider through different dictionaries that declare the same input
+        // (person_id) while each fetcher stages a different undeclared parameter
+        // (extra=alpha vs extra=beta). Correct behavior: one provider call, second
+        // fetch served from cache. A regression to keying on the whole staged fetch
+        // map would make it two calls.
+        long before = com.accenture.minigraph.mock.CacheCounter.current();
+        var result = runGraph("unit-test-cache-key", Map.of("person_id", 100));
+        assertInstanceOf(Map.class, result);
+        var mm = new MultiLevelMap((Map<String, Object>) result);
+        long after = com.accenture.minigraph.mock.CacheCounter.current();
+        assertEquals(1, after - before,
+                "the provider must be called exactly once - the second fetch reads the cache");
+        assertEquals(mm.getElement("count1"), mm.getElement("count2"),
+                "both fetches must see the same cached response");
+        log.info("Fetcher cache key is scoped to dictionary-declared inputs");
+    }
+
+    private Object runGraph(String graphId, Map<String, Object> input) throws TimeoutException {
+        var request = new AsyncHttpRequest().setMethod("POST").setTargetHost(target)
+                .setBody(input).setHeader("Content-Type", "application/json")
+                .setHeader("Accept", "application/json")
+                .setUrl("/api/graph/" + graphId);
+        var event = new EventEnvelope().setTo("async.http.request").setBody(request);
+        var po = PostOffice.trackable("unit.test", String.format("%032x", 999), "TEST /graph/" + graphId);
+        var response = po.asyncRequest(event, TIMEOUT).await(TIMEOUT, TimeUnit.MILLISECONDS);
+        if (response.hasError()) {
+            log.error("RunGraph HTTP-{} - {}", response.getStatus(), response.getBody());
+        }
+        return response.getBody();
+    }
+
     private Object runTutorial(int chapter, Map<String, Object> input) throws TimeoutException {
         var request = new AsyncHttpRequest().setMethod(input.isEmpty()? "GET" : "POST").setTargetHost(target);
         if (!input.isEmpty()) {
@@ -324,7 +398,7 @@ class GraphTests {
         var po = PostOffice.trackable("unit.test", traceId, "TEST /chapter/"+chapter);
         var response = po.asyncRequest(event, TIMEOUT).await(TIMEOUT, TimeUnit.MILLISECONDS);
         if (response.hasError()) {
-            log.error("HTTP-{} - {}", response.getStatus(), response.getBody());
+            log.error("RunTutorial HTTP-{} - {}", response.getStatus(), response.getBody());
         }
         return response.getBody();
     }

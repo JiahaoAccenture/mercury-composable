@@ -7,11 +7,13 @@ applications from **self-contained functions wired by YAML-configured event
 flows**. Functions have no direct knowledge of each other — all coupling is
 through named routes and event envelopes, so orchestration is configuration,
 not code. Uses Java 21 virtual threads throughout, making sequential synchronous
-RPC perform on par with reactive code. Also available for Node.js (separate repo).
+RPC perform on par with reactive code. An official Rust port exists (github.com/Accenture/mercury);
+the old Node.js port is ~2 years out of sync and slated for a fresh re-port — do NOT point
+readers to it (docs/README references were removed 2026-07-20).
 
 **Type:** Multi-module framework / SDK (Maven reactor)
 **Primary language:** Java 21 (one Kotlin example module)
-**Coordinates:** `com.accenture.mercury:parent-mercury` (currently `4.6.1`)
+**Coordinates:** `com.accenture.mercury:parent-mercury` (version: root `pom.xml` is the source of truth)
 **Build:** Maven 3.9.7+ — `pom.xml` source of truth for the version
 **Upstream:** github.com/Accenture/mercury-composable · docs: accenture.github.io/mercury-composable
 

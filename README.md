@@ -4,6 +4,11 @@ A Java framework for building composable, event-driven applications from self-co
 
 > **New here?** [**Getting Started**](https://accenture.github.io/mercury-composable/guides/getting-started/) runs a working app in five minutes. **Building with an AI agent?** Start with the [**AI Developer Guide**](https://accenture.github.io/mercury-composable/guides/ai-developer-guide/).
 
+> **Prefer Rust?** Mercury is also available as an official **Rust implementation** — the same
+> three layers and the same YAML flow syntax (flow files port unchanged), faithfully following
+> this project's behavior: [github.com/Accenture/mercury](https://github.com/Accenture/mercury)
+> · [documentation](https://accenture.github.io/mercury/).
+
 ## What is Mercury Composable?
 
 An application is assembled from **independent functions** — plain Java classes with no knowledge of one another — that communicate only through **events**. The flows that sequence them live in **YAML**, so orchestration is configuration, not code. Everything runs on Java 21 **virtual threads**, so straightforward blocking code performs like reactive, and each function's immutable input/output makes the design equally friendly to human developers and AI code assistants.
@@ -54,12 +59,8 @@ Full documentation: **[accenture.github.io/mercury-composable](https://accenture
 | **Layer 1 — Platform Core** | [Architecture](https://accenture.github.io/mercury-composable/guides/architecture/) · [Methodology](https://accenture.github.io/mercury-composable/guides/methodology/) · [Event-driven Foundation](https://accenture.github.io/mercury-composable/guides/event-driven/) · [REST Automation](https://accenture.github.io/mercury-composable/guides/rest-automation/) |
 | **Layer 2 — Event Script** | [Overview](https://accenture.github.io/mercury-composable/guides/event-script/) · [Syntax](https://accenture.github.io/mercury-composable/guides/event-script/syntax/) · [Flow Schema](https://accenture.github.io/mercury-composable/guides/flow-schema-reference/) · [Build, Test & Deploy](https://accenture.github.io/mercury-composable/guides/build-test-deploy/) |
 | **Layer 3 — Knowledge Graph** | [Knowledge Graph as Application](https://accenture.github.io/mercury-composable/guides/knowledge-graph/) |
-| **Operate & integrate** | [Observability](https://accenture.github.io/mercury-composable/guides/observability/) · [Spring Boot](https://accenture.github.io/mercury-composable/guides/spring-boot/) · [Kafka Flow Adapter](https://accenture.github.io/mercury-composable/guides/kafka-flow-adapter/) · [Sync-over-Async](https://accenture.github.io/mercury-composable/guides/sync-over-async/) |
+| **Operate & integrate** | [Observability](https://accenture.github.io/mercury-composable/guides/observability/) · [Spring Boot](https://accenture.github.io/mercury-composable/guides/spring-boot/) · [Minimalist Kafka](https://accenture.github.io/mercury-composable/guides/minimalist-kafka/) · [Sync-over-Async](https://accenture.github.io/mercury-composable/guides/sync-over-async/) |
 | **Reference** | [API Overview](https://accenture.github.io/mercury-composable/guides/api-overview/) · [Configuration](https://accenture.github.io/mercury-composable/guides/configuration-reference/) · [Annotations](https://accenture.github.io/mercury-composable/guides/annotations-reference/) · [ADRs](https://accenture.github.io/mercury-composable/arch-decisions/ADR/) |
-
-## Also available in Node.js
-
-See [mercury-nodejs](https://github.com/Accenture/mercury-nodejs) for the core library and [mercury-composable-examples](https://github.com/Accenture/mercury-composable-examples) for usage examples.
 
 ## Contributing
 

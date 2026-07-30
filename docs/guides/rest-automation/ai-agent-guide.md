@@ -85,6 +85,25 @@ rest:
     timeout: 10s
 ```
 
+A traced endpoint serving a legacy caller that uses its own trace/correlation header names
+(per-endpoint impedance matching — the optional `trace.id.header` / `correlation.id.header` /
+`traceparent.header` keys override the global `http.trace.id.header` / `http.correlation.id.header` /
+`http.traceparent.header` names for this entry only; the standard W3C `traceparent` always takes
+precedence, and a custom `traceparent.header` name is read only when the standard header is
+absent. These overrides are for backward compatibility with legacy systems only — the standard
+W3C/OTel `traceparent` needs no configuration and departing from it is discouraged):
+
+```yaml
+rest:
+  - service: 'legacy.orders'
+    methods: ['POST']
+    url: '/api/legacy/orders'
+    timeout: 15s
+    tracing: true
+    trace.id.header: 'X-Legacy-Trace'
+    correlation.id.header: 'X-Legacy-Cid'
+```
+
 ## See also {#see-also}
 
 - [REST automation grammar](rest-grammar.md) + [`rest-automation.json`](rest-automation.json) — the source of truth.

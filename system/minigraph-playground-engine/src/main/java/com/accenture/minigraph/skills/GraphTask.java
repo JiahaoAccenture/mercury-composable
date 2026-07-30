@@ -114,9 +114,9 @@ public class GraphTask extends GraphLambdaFunction {
     @SuppressWarnings("unchecked")
     private Object stageTaskParameter(String nodeName, EventEnvelope request, String rhs, Object value, Object body) {
         if (WHOLE_BODY.equals(rhs)) {
-            // '*' maps the LHS value as the whole request body;
-            // a map is deep copied so that later entries can merge into it without
-            // touching the graph's state machine
+            // The whole-body target maps the LHS value as the entire request body.
+            // A map is deep copied so that later entries can merge into it without
+            // touching the graph's state machine.
             return value instanceof Map? util.deepCopy((Map<String, Object>) value) : value;
         }
         if (rhs.startsWith(HEADER_NAMESPACE)) {
@@ -146,8 +146,12 @@ public class GraphTask extends GraphLambdaFunction {
         var nodeName = node.getAlias();
         var stateMachine = graphInstance.stateMachine;
         stateMachine.setElement(nodeName + "." + TARGET, route);
+        // issue the request on the worker thread so the outbound event carries this span
+        // as the task call's parent (the trace context is thread-keyed and would be gone
+        // inside the Mono callback)
+        var invoked = po.eRequest(request, ttl, false);
         return Mono.create(sink ->
-            po.eRequest(request, ttl, false).thenAccept(response -> {
+            invoked.thenAccept(response -> {
                 stateMachine.setElement(nodeName + "." + STATUS, response.getStatus());
                 if (!response.getHeaders().isEmpty()) {
                     stateMachine.setElement(nodeName + "." + HEADER, response.getHeaders());

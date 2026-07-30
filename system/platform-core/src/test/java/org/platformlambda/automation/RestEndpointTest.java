@@ -74,6 +74,212 @@ class RestEndpointTest extends TestBase {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    @Test
+    void perEndpointHeaderOverridesCaptureTraceAndCid() throws InterruptedException {
+        // /api/legacy/probe declares 'trace.id.header: X-Legacy-Trace' and
+        // 'correlation.id.header: X-Legacy-Cid' in rest.yaml - the endpoint captures a legacy caller's
+        // custom headers instead of the global X-Trace-Id / X-Correlation-Id names
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/legacy/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json");
+        req.setHeader("X-Legacy-Trace", "legacy-trace-0001");
+        req.setHeader("X-Legacy-Cid", "legacy-cid-0001");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        assertInstanceOf(Map.class, response.getBody());
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals("legacy-trace-0001", probe.get("traceId"),
+                "trace-id captured from the per-endpoint 'trace.id.header' override");
+        assertEquals("legacy-cid-0001", probe.get("cid"),
+                "business correlation-id captured from the per-endpoint 'correlation.id.header' override");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void conflatedHeaderNamesGenerateOneIdForTraceAndCid() throws InterruptedException {
+        // Legacy conflation config (/api/conflated/probe declares the SAME header name for
+        // trace.id.header and correlation.id.header): when the shared header is absent, the edge
+        // must generate ONE id serving both - a divergent pair would make the outbound hop
+        // self-inconsistent (traceparent carrying one id, the shared header another).
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/conflated/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertInstanceOf(String.class, probe.get("traceId"));
+        String generated = (String) probe.get("traceId");
+        assertEquals(32, generated.length());
+        assertFalse(generated.contains("-"));
+        assertEquals(generated, probe.get("cid"),
+                "the generated trace-id and correlation-id must be ONE id under a shared header name");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void conflatedHeaderSuppliedFeedsBothIds() throws InterruptedException {
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/conflated/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json").setHeader("X-Shared-Id", "shared-0001");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals("shared-0001", probe.get("traceId"));
+        assertEquals("shared-0001", probe.get("cid"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void conflatedHeaderAdoptsTraceparentWhenSharedHeaderAbsent() throws InterruptedException {
+        // when a W3C traceparent arrives but the shared header does not, the trace id from the
+        // traceparent is authoritative and the correlation-id adopts it - one id, end to end
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        String w3cTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/conflated/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json")
+                .setHeader("traceparent", "00-" + w3cTraceId + "-00f067aa0ba902b7-01");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals(w3cTraceId, probe.get("traceId"));
+        assertEquals(w3cTraceId, probe.get("cid"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void customTraceparentHeaderNameCarriesTheTraceContext() throws InterruptedException {
+        // http.traceparent.header=X-Trace-Context in this test suite: when the standard W3C
+        // "traceparent" is absent (an intermediary stripped it), the custom name delivers the context
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        String w3cTraceId = "1af92f3577b34da6a3ce929d0e0e4701";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/legacy/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json")
+                .setHeader("X-Trace-Context", "00-" + w3cTraceId + "-00f067aa0ba902b7-01");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals(w3cTraceId, probe.get("traceId"),
+                "the endpoint adopted the W3C trace context carried under the custom header name");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void standardTraceparentWinsOverCustomHeaderName() throws InterruptedException {
+        // the standards position: a well-formed standard traceparent means the caller already
+        // speaks W3C/OTel - a proprietary header alongside it is residual and safely ignored
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        String residualTraceId = "2af92f3577b34da6a3ce929d0e0e4702";
+        String standardTraceId = "3af92f3577b34da6a3ce929d0e0e4703";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/legacy/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json")
+                .setHeader("X-Trace-Context", "00-" + residualTraceId + "-00f067aa0ba902b7-01")
+                .setHeader("traceparent", "00-" + standardTraceId + "-00f067aa0ba902b8-01");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals(standardTraceId, probe.get("traceId"),
+                "the standard W3C traceparent wins; the custom name is a fallback only");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void standardTraceparentIsAuthoritativeUnderCustomName() throws InterruptedException {
+        // a standards-compliant caller that only sends the standard header propagates normally,
+        // even though this application is configured with a custom traceparent name
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        String w3cTraceId = "4af92f3577b34da6a3ce929d0e0e4704";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/legacy/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json")
+                .setHeader("traceparent", "00-" + w3cTraceId + "-00f067aa0ba902b7-01");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals(w3cTraceId, probe.get("traceId"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void perEndpointTraceparentOverrideBeatsGlobalName() throws InterruptedException {
+        // /api/renamed/traceparent/probe declares 'traceparent.header: X-Endpoint-Trace' in rest.yaml,
+        // which replaces the global custom name (X-Trace-Context) for that endpoint. The standard
+        // traceparent is absent here, so the effective custom name is the fallback source.
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        String endpointTraceId = "5af92f3577b34da6a3ce929d0e0e4705";
+        String globalNameTraceId = "6af92f3577b34da6a3ce929d0e0e4706";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/renamed/traceparent/probe").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json")
+                .setHeader("X-Endpoint-Trace", "00-" + endpointTraceId + "-00f067aa0ba902b7-01")
+                .setHeader("X-Trace-Context", "00-" + globalNameTraceId + "-00f067aa0ba902b8-01");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        po.asyncRequest(request, RPC_TIMEOUT).onSuccess(bench::add);
+        EventEnvelope response = bench.poll(10, TimeUnit.SECONDS);
+        assert response != null;
+        Map<String, Object> probe = (Map<String, Object>) response.getBody();
+        assertEquals(endpointTraceId, probe.get("traceId"),
+                "the per-endpoint traceparent.header override takes precedence over the global name");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void asyncHttpClientStampsTraceContextUnderBothNames() throws InterruptedException, ExecutionException {
+        // outbound: with http.traceparent.header configured, AsyncHttpClient stamps the SAME W3C value
+        // under both the standard "traceparent" and the custom name, so the context survives an
+        // intermediary that strips the standard header while compliant hops keep working
+        String w3cTraceId = "7af92f3577b34da6a3ce929d0e0e4707";
+        String traceparent = "00-" + w3cTraceId + "-00f067aa0ba902b7-01";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setHeader("accept", "application/json").setHeader("traceparent", traceparent);
+        req.setUrl("/api/echo/chain").setQueryParameter("port", String.valueOf(port));
+        req.setTargetHost("http://127.0.0.1:" + port);
+        EventEnvelope response = po.asyncRequest(new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST)
+                .setBody(req), RPC_TIMEOUT).toCompletionStage().toCompletableFuture().get();
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        assertInstanceOf(Map.class, response.getBody());
+        MultiLevelMap map = new MultiLevelMap((Map<String, Object>) response.getBody());
+        String stamped = (String) map.getElement("headers.traceparent");
+        assertNotNull(stamped, "the traced caller stamped the standard traceparent on the outgoing hop");
+        assertTrue(stamped.startsWith("00-" + w3cTraceId + "-"),
+                "the stamped traceparent continues the caller's trace");
+        assertEquals(stamped, map.getElement("headers.x-trace-context"),
+                "the same W3C value must be stamped under the custom traceparent header name");
+    }
+
     @Test
     void optionsMethodTest() throws InterruptedException {
         final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
@@ -99,6 +305,39 @@ class RestEndpointTest extends TestBase {
     }
 
     @SuppressWarnings(value = "unchecked")
+    @Test
+    void responseEchoesInboundCorrelationId() throws InterruptedException, ExecutionException {
+        // the edge echoes the request's business correlation-id on the HTTP response so the
+        // caller can correlate without parsing the body
+        var po = PostOffice.trackable("unit.test", "310", "GET /api/hello/world");
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/hello/world").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json");
+        req.setHeader("X-Correlation-Id", "cid-echo-0101");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        EventEnvelope response = po.eRequest(request, RPC_TIMEOUT).get();
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        assertEquals("cid-echo-0101", response.getHeader("x-correlation-id"));
+    }
+
+    @Test
+    void responseCarriesGeneratedCorrelationIdWhenAbsent() throws InterruptedException, ExecutionException {
+        // when the caller does not provide one, the edge generates a correlation-id and
+        // still returns it on the response
+        var po = PostOffice.trackable("unit.test", "311", "GET /api/hello/world");
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setUrl("/api/hello/world").setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json");
+        EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
+        EventEnvelope response = po.eRequest(request, RPC_TIMEOUT).get();
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        String cid = response.getHeader("x-correlation-id");
+        assertNotNull(cid, "the generated correlation-id must be echoed on the response");
+        assertFalse(cid.isEmpty());
+    }
+
     @Test
     void serviceTest() throws InterruptedException, ExecutionException {
         final int TTL_SECONDS = 7;
@@ -158,6 +397,40 @@ class RestEndpointTest extends TestBase {
         MultiLevelMap map = new MultiLevelMap((Map<String, Object>) response.getBody());
         // AsyncHttpClient forwarded the business correlation-id downstream; the service echoes it back
         assertEquals(correlationId, map.getElement("headers.x-correlation-id"));
+        // ... and stamped the trace id under the default X-Trace-Id header - even for a non-W3C trace id
+        // ("201" is not 32-hex, so no traceparent can be formed and X-Trace-Id is the only carrier)
+        assertEquals("201", map.getElement("headers.x-trace-id"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void traceContinuesAcrossApplicationToApplicationHttpCall() throws InterruptedException, ExecutionException {
+        // The application-to-application case reported from the field: application A receives a traced
+        // HTTP request and its function calls application B's endpoint through "async.http.request".
+        // AsyncHttpClient stamps the current trace context on the outgoing request (X-Trace-Id plus W3C
+        // "traceparent") and app B's REST automation ("tracing: true" on the endpoint) continues the
+        // SAME trace instead of starting a fresh one. Here /api/chain/probe (downstream.caller) is
+        // app A and /api/legacy/probe (header.probe) is app B - one JVM, but both hops go through the
+        // real HTTP stack, exactly like two separate applications.
+        String w3cTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        String traceparent = "00-" + w3cTraceId + "-00f067aa0ba902b7-01";
+        EventEmitter po = EventEmitter.getInstance();
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("GET").setHeader("accept", "application/json").setHeader("traceparent", traceparent);
+        req.setUrl("/api/chain/probe").setQueryParameter("port", String.valueOf(port));
+        req.setTargetHost("http://127.0.0.1:" + port);
+        EventEnvelope response = po.asyncRequest(new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST)
+                .setBody(req), RPC_TIMEOUT).toCompletionStage().toCompletableFuture().get();
+        assert response != null;
+        assertEquals(200, response.getStatus());
+        assertInstanceOf(Map.class, response.getBody());
+        MultiLevelMap map = new MultiLevelMap((Map<String, Object>) response.getBody());
+        // hop 1: application A adopted the upstream W3C trace context at its HTTP ingress
+        assertEquals(w3cTraceId, map.getElement("caller_trace_id"));
+        // hop 2: application B continued the SAME trace across the app-to-app HTTP call
+        // (its endpoint captures a different legacy trace-id header name, so this also proves the
+        // W3C traceparent stamped by AsyncHttpClient takes precedence regardless of header naming)
+        assertEquals(w3cTraceId, map.getElement("probe_traceId"));
     }
 
     @SuppressWarnings("unchecked")
@@ -511,18 +784,7 @@ class RestEndpointTest extends TestBase {
         String publishedStreamId1 = getStream(bytes1, 10);
         ByteArrayOutputStream bytes2 = new ByteArrayOutputStream();
         String publishedStreamId2 = getStream(bytes2, 20);
-        AsyncHttpRequest req = new AsyncHttpRequest();
-        req.setMethod("POST");
-        req.setUrl("/api/upload/demo");
-        req.setTargetHost("http://127.0.0.1:"+port);
-        req.setHeader("accept", "application/json");
-        req.setHeader("content-type", MULTIPART_FORM_DATA);
-        // To upload multiple files using multipart/form-data,
-        // file-names, file-content-types and stream-routes must be set.
-        req.setFileNames(List.of("hello1.txt", "hello2.txt"));
-        req.setFileContentTypes(List.of("text/plain", "text/plain"));
-        req.setStreamRoutes(List.of(publishedStreamId1, publishedStreamId2));
-        req.setUploadTags(List.of("file1", "file2"));
+        AsyncHttpRequest req = newMultipartUploadRequest(publishedStreamId1, publishedStreamId2);
         EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
         Future<EventEnvelope> res = po.asyncRequest(request, RPC_TIMEOUT);
         res.onSuccess(bench1::add);
@@ -559,6 +821,23 @@ class RestEndpointTest extends TestBase {
         Boolean done2 = bench2.poll(10, TimeUnit.SECONDS);
         assertEquals(true, done2);
         assertArrayEquals(bytes2.toByteArray(), result2.toByteArray());
+    }
+
+    /** Build the multipart/form-data upload request carrying the two published streams. */
+    private AsyncHttpRequest newMultipartUploadRequest(String streamId1, String streamId2) {
+        AsyncHttpRequest req = new AsyncHttpRequest();
+        req.setMethod("POST");
+        req.setUrl("/api/upload/demo");
+        req.setTargetHost("http://127.0.0.1:" + port);
+        req.setHeader("accept", "application/json");
+        req.setHeader("content-type", MULTIPART_FORM_DATA);
+        // To upload multiple files using multipart/form-data,
+        // file-names, file-content-types and stream-routes must be set.
+        req.setFileNames(List.of("hello1.txt", "hello2.txt"));
+        req.setFileContentTypes(List.of("text/plain", "text/plain"));
+        req.setStreamRoutes(List.of(streamId1, streamId2));
+        req.setUploadTags(List.of("file1", "file2"));
+        return req;
     }
 
     @SuppressWarnings("unchecked")
@@ -818,8 +1097,8 @@ class RestEndpointTest extends TestBase {
         // HTTP head response may include custom headers and content-length
         assertEquals("HEAD request received", response.getHeader("X-Response"));
         assertEquals("100", response.getHeader("Content-Length"));
-        // the trace/correlation header is NOT echoed back to the caller (legacy echo-back removed)
-        assertNull(response.getHeader("X-Correlation-Id"));
+        // the business correlation-id IS echoed back to the caller; the trace header is not
+        assertEquals(traceId, response.getHeader("X-Correlation-Id"));
         assertNull(response.getHeader("X-Trace-Id"));
         // multiple "set-cookie" headers are consolidated into one composite value
         assertEquals("first=cookie|second=one", response.getHeader("set-cookie"));

@@ -1013,6 +1013,156 @@ class PostOfficeTest extends TestBase {
         assertEquals(world, multi.getElement("annotations.hello"));
         // round trip latency is available because RPC metrics are delivered to the caller
         assertTrue(multi.exists("trace.round_trip"));
+        // the RPC record carries the callee's own span id (regression: it was absent)
+        assertTrue(multi.exists("trace.span_id"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void accidentalMetadataEchoIsSanitizedAtExit() throws InterruptedException, ExecutionException {
+        // Eric's scenario: a function accidentally copies its input headers - including the
+        // injected read-only metadata - onto a returned EventEnvelope. The exit-side
+        // sanitization must filter the protected keys while keeping ordinary headers.
+        String echoAllHeaders = "echo.all.headers";
+        LambdaFunction f = (headers, input, instance) -> {
+            EventEnvelope result = new EventEnvelope().setBody("ok");
+            headers.forEach(result::setHeader);         // the accidental copy
+            result.setHeader("x-event-api", "spoofed"); // deliberate engine-internal key
+            return result;
+        };
+        Platform.getInstance().registerPrivate(echoAllHeaders, f, 1);
+        try {
+            Map<String, String> ctx = new HashMap<>();
+            ctx.put("my_route", "unit.test");
+            ctx.put("my_trace_id", "trace-sanitize-1");
+            ctx.put("my_trace_path", "TEST /exit/sanitization");
+            ctx.put("my_correlation_id", "cid-sanitize-1");
+            PostOffice po = PostOffice.trackable(ctx, 1);
+            EventEnvelope req = new EventEnvelope().setTo(echoAllHeaders)
+                    .setBody("x").setHeader("hello", "world");
+            EventEnvelope reply = po.request(req, 8000).get();
+            assertEquals("ok", reply.getBody());
+            // ordinary headers survive
+            assertEquals("world", reply.getHeader("hello"));
+            // protected metadata and engine-internal keys are filtered out at exit
+            assertNull(reply.getHeader("my_route"));
+            assertNull(reply.getHeader("my_trace_id"));
+            assertNull(reply.getHeader("my_trace_path"));
+            assertNull(reply.getHeader("my_correlation_id"));
+            assertNull(reply.getHeader("x-event-api"));
+        } finally {
+            Platform.getInstance().release(echoAllHeaders);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void transportedMetadataIsScrubbedFromTheDeliveredEnvelopeView() throws InterruptedException, ExecutionException {
+        // The entry-side twin of the exit sanitization above: a peer transports the engine's
+        // reserved keys as ordinary envelope headers (e.g. a function that copied its injected
+        // input view onto an outgoing event, or a spoofing caller). The worker must scrub them
+        // from the delivered envelope view - a function's input envelope never surfaces engine
+        // metadata as application data - while ordinary headers survive and the injected view
+        // still carries the real context.
+        Map<String, String> ctx = new HashMap<>();
+        ctx.put("my_route", "unit.test");
+        ctx.put("my_trace_id", "trace-entry-scrub-1");
+        ctx.put("my_trace_path", "TEST /entry/scrub");
+        PostOffice po = PostOffice.trackable(ctx, 1);
+        EventEnvelope req = new EventEnvelope().setTo("clean.envelope.echo")
+                .setBody("x").setHeader("hello", "clean")
+                .setHeader("my_route", "spoofed.route")
+                .setHeader("my_trace_id", "spoofed-trace")
+                .setHeader("my_trace_path", "SPOOF /path")
+                .setHeader("x-event-api", "spoofed");
+        EventEnvelope reply = po.request(req, 8000).get();
+        assertInstanceOf(Map.class, reply.getBody());
+        Map<String, Object> result = (Map<String, Object>) reply.getBody();
+        Map<String, String> envelopeView = (Map<String, String>) result.get("envelope_headers");
+        // ordinary headers survive in the envelope view
+        assertEquals("clean", envelopeView.get("hello"));
+        // the transported engine keys are scrubbed from the delivered envelope
+        assertFalse(envelopeView.containsKey("my_route"));
+        assertFalse(envelopeView.containsKey("my_trace_id"));
+        assertFalse(envelopeView.containsKey("my_trace_path"));
+        assertFalse(envelopeView.containsKey("my_correlation_id"));
+        assertFalse(envelopeView.containsKey("x-event-api"));
+        // the injected view is unaffected: real context, not the spoofed values
+        assertEquals("clean.envelope.echo", result.get("injected_route"));
+    }
+
+    @Test
+    void legacyCorrelationIdHeaderIsHonoredThenScrubbed() throws InterruptedException, ExecutionException {
+        // a pre-4.10.2 peer transports the business correlation-id as the my_correlation_id
+        // envelope header (no my_cid tag): the worker must still honor it - the function reads
+        // it via getMyCorrelationId() - while the delivered envelope view stays clean
+        EventEnvelope req = new EventEnvelope().setTo("clean.envelope.echo")
+                .setBody("x").setHeader("my_correlation_id", "legacy-cid-0042");
+        EventEnvelope reply = EventEmitter.getInstance().request(req, 8000).get();
+        assertInstanceOf(Map.class, reply.getBody());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) reply.getBody();
+        assertEquals("legacy-cid-0042", result.get("injected_cid"),
+                "the legacy header is honored into the injected view");
+        @SuppressWarnings("unchecked")
+        Map<String, String> envelopeView = (Map<String, String>) result.get("envelope_headers");
+        assertFalse(envelopeView.containsKey("my_correlation_id"),
+                "the legacy carrier is scrubbed from the delivered envelope view");
+    }
+
+    @Test
+    void rpcTelemetryCarriesSpanLineage() throws InterruptedException {
+        // Regression: the RPC trace record (the one with round_trip) must chain like a
+        // worker-emitted record - span_id is the callee's own span (carried on the RPC
+        // reply) and parent_span_id is the caller's span (carried on the outbound
+        // request). Previously both were absent, breaking the span tree for every
+        // RPC-invoked function, e.g. a declarative Event-over-HTTP call.
+        String traceForwarder = "distributed.trace.forwarder";
+        BlockingQueue<Map<String, Object>> records = new ArrayBlockingQueue<>(10);
+        Platform platform = Platform.getInstance();
+        String traceId = util.getUuid();
+        String parentFunction = "span.lineage.parent";
+        String leafFunction = "span.lineage.leaf";
+        LambdaFunction collector = (headers, input, instance) -> {
+            Map<String, Object> trace = (Map<String, Object>) input;
+            MultiLevelMap map = new MultiLevelMap(trace);
+            if (traceId.equals(map.getElement("trace.id"))) {
+                records.add(trace);
+            }
+            return null;
+        };
+        LambdaFunction leaf = (headers, input, instance) -> "ok";
+        LambdaFunction intermediate = (headers, input, instance) -> {
+            // a traced function making an RPC - its own span is the leaf's parent
+            PostOffice po = new PostOffice(headers, instance);
+            return po.request(new EventEnvelope().setTo(leafFunction).setBody("x"), 8000).get().getBody();
+        };
+        platform.registerPrivate(traceForwarder, collector, 1);
+        platform.registerPrivate(parentFunction, intermediate, 1);
+        platform.registerPrivate(leafFunction, leaf, 1);
+        PostOffice po = new PostOffice("unit.test", traceId, "GET /api/span/lineage");
+        po.asyncRequest(new EventEnvelope().setTo(parentFunction).setBody("start"), 8000)
+                .onSuccess(response -> assertEquals("ok", response.getBody()));
+        // collect trace records until the leaf's RPC record (with round_trip) arrives
+        MultiLevelMap leafRecord = null;
+        long deadline = System.currentTimeMillis() + 10000;
+        while (leafRecord == null && System.currentTimeMillis() < deadline) {
+            Map<String, Object> item = records.poll(2, TimeUnit.SECONDS);
+            if (item != null) {
+                MultiLevelMap m = new MultiLevelMap(item);
+                if (leafFunction.equals(m.getElement("trace.service")) && m.exists("trace.round_trip")) {
+                    leafRecord = m;
+                }
+            }
+        }
+        platform.release(traceForwarder);
+        platform.release(parentFunction);
+        platform.release(leafFunction);
+        assertNotNull(leafRecord, "the RPC trace record for the leaf must arrive");
+        assertNotNull(leafRecord.getElement("trace.span_id"),
+                "the RPC record carries the callee's own span");
+        assertNotNull(leafRecord.getElement("trace.parent_span_id"),
+                "the RPC record chains onto the caller's span");
     }
 
     @Test

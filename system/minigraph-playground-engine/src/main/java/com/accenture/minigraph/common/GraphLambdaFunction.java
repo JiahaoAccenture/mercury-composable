@@ -52,6 +52,7 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
     protected static final String MESSAGE = "message";
     protected static final String COMMAND = "command";
     protected static final String FORWARDED = "forwarded";
+    protected static final String DIRECT = "direct";
     protected static final String UNTYPED = "untyped";
     protected static final String NAME = "name";
     protected static final String ROOT = "root";
@@ -86,9 +87,8 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
     protected static final String QUERY_NAMESPACE = "query.";
     protected static final String PATH_PARAMETER = "path_parameter";
     protected static final String PATH_PARAMETER_NAMESPACE = "path_parameter.";
-    protected static final String INPUT_BODY_NAMESPACE = "input.body";
+    protected static final String INPUT_BODY = "input.body";
     protected static final String INPUT_HEADER_NAMESPACE = "input.header";
-    protected static final String OUTPUT_BODY_NAMESPACE = "output.body";
     protected static final String OUTPUT_HEADER_NAMESPACE = "output.header";
     protected static final String MODEL = "model";
     protected static final String MODEL_NAMESPACE = "model.";
@@ -118,11 +118,23 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
     protected static final String RUN = "run";
     protected static final String TTL = "ttl";
     protected static final String MODEL_TTL = "model.ttl";
+    protected static final String MODEL_CID = "model.cid";
+    // suspend/resume vocabulary: 'suspend' is both the reserved node alias (the root/end
+    // pattern - traversal jumps to it by name) and the node property that marks a node
+    // as suspensible; 'resume:<node>' is the walker directive that continues traversal
+    // after that node without re-executing it
+    protected static final String SUSPEND = "suspend";
+    protected static final String FROM = "from";
+    protected static final String RESUME_PREFIX = "resume:";
+    protected static final String SUSPENDED = "suspended";
+    protected static final String CID = "cid";
+    protected static final String SEEN = "seen";
+    protected static final String PUT = "put";
+    protected static final String GET = "get";
     protected static final String STATUS = "status";
     protected static final String HEADER = "header";
     protected static final String ERROR = "error";
     protected static final String EXCEPTION = "exception";
-    protected static final String CONTINUE = "continue";
     protected static final String INSTANTIATE = "instantiate";
     protected static final String DELETE = "delete";
     protected static final String START = "start";
@@ -145,9 +157,12 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
     protected static final String INSPECT = "inspect";
     protected static final String DOT_DECISION = ".decision";
     protected static final String DOT_DELAY = ".delay";
+    // 'ttl' is deliberately NOT reserved: it is a task parameter of the suspend node
+    // (the data-store expiry timer), not engine-routing configuration, and it collides
+    // with nothing else
     private static final Set<String> RESERVED_PARAMETERS = Set.of(SKILL, MAPPING, STATEMENT, INPUT, OUTPUT, FEATURE,
                                     EXCEPTION, EXTENSION, STATUS, ERROR, DICTIONARY, FOR_EACH, CONCURRENCY, PURPOSE,
-                                    TASK);
+                                    TASK, SUSPEND);
     private static final AtomicLong loopInterval = new AtomicLong(-1);
     private static final AtomicLong highFrequency = new AtomicLong(-1);
 
@@ -167,6 +182,11 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
         } else {
             return node;
         }
+    }
+
+    protected boolean isSuspensible(SimpleNode node) {
+        var value = node.getProperty(SUSPEND);
+        return value != null && "true".equalsIgnoreCase(String.valueOf(value));
     }
 
     protected long getLoopInterval() {
@@ -326,6 +346,10 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
         var nodes = util.split(command, "[],; ");
         for (var name : nodes) {
             graphInstance.nodeSeen.remove(name);
+            // forget the completion mark too - a join barrier consults skillRun,
+            // so a reset (retrying) node must not satisfy the barrier until it
+            // re-executes successfully
+            graphInstance.skillRun.remove(name);
             var node = graph.findNodeByAlias(name);
             if (node != null) {
                 stateMachine.removeElement(name);
@@ -640,12 +664,10 @@ public abstract class GraphLambdaFunction implements TypedLambdaFunction<EventEn
 
     protected String getNext(MiniGraph graph, String statement) {
         if (!NEXT.equalsIgnoreCase(statement)) {
-            var nextNode = getNode(statement, graph);
-            if (nextNode == null) {
-                throw new IllegalArgumentException(NODE_NAME + statement + NOT_FOUND);
-            } else {
-                return statement;
-            }
+            // getNode throws when the alias does not exist - existence check
+            // and error message are owned there
+            getNode(statement, graph);
+            return statement;
         }
         return null;
     }

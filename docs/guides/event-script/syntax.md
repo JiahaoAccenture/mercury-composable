@@ -442,7 +442,14 @@ Subsequent override of the "instances" parameter is ignored. i.e. the first prel
 
 As shown in Figure 1, you can run one or more sub-flows inside a primary flow.
 
-![Hierarchy of flows](../diagrams/parent-namespace.png)
+```mermaid
+flowchart LR
+    pds[/"model dataset<br>+ model.parent dataset"/] -.- primary["primary flow"]
+    primary --> sub1["sub-flow"]
+    primary --> sub2["sub-flow"]
+    ds1[/"model dataset<br>+ shared model.parent"/] -.- sub1
+    ds2[/"model dataset<br>+ shared model.parent"/] -.- sub2
+```
 
 > Figure 1 - Hierarchy of flows
 
@@ -925,9 +932,10 @@ It is because a text constant may contain any special characters including the m
 
 ### Metadata for each flow instance
 
-For each flow instance, the state machine in the "model" namespace provides the following metadata that
-you can use in the input/output data mapping. For example, you can set this for an exception handler to
-log additional information.
+For each flow instance, the state machine in the "model" namespace provides the following READ only metadata
+that you can use as a mapping source in your input and output data mapping statements — the flow compiler
+rejects any data mapping that overwrites these keys. For example, you can set this for an exception handler
+to log additional information.
 
 
 | Type             | Keyword          | Comment                                    |
@@ -937,6 +945,7 @@ log additional information.
 | Trace ID         | `model.trace`    | Optional traceId when tracing is turned on |
 | Correlation ID   | `model.cid`      | Correlation ID of the inbound request      |
 | Time to live     | `model.ttl`      | TTL for a flow instance in milliseconds    |
+| Run condition    | `model.run`      | Set by the knowledge graph's `graph.resume` skill: `resume` or `fresh`; absent outside suspend/resume graphs |
 
 ### Special handling for header
 
@@ -1491,50 +1500,157 @@ For example:
 
 ### Built-in Plugins
 
-| Type                | Plugin `name`   | Expected Inputs                                                                                                       |
-|:--------------------|:----------------|:----------------------------------------------------------------------------------------------------------------------|
-| **Arithmetic**      | add             | At least two _whole_ numbers                                                                                          |
-| **Arithmetic**      | subtract        | At least two _whole_ numbers                                                                                          |
-| **Arithmetic**      | multiply        | At least two _whole_ numbers                                                                                          |
-| **Arithmetic**      | div             | At least two _whole_ numbers                                                                                          |
-| **Arithmetic**      | mod             | Two individual whole numbers                                                                                          |
-| **Arithmetic**      | increment       | A single _whole_ number                                                                                               |
-| **Arithmetic**      | decrement       | A single _whole_ number                                                                                               |
-| **Generator**       | uuid            | None                                                                                                                  |
-| **Generator**       | dateTime        | None.                                                                                                                 |
-| **Generator**       | now             | text(iso), text(local) or text(ms)                                                                                    |
-| **Logical**         | eq              | At least two Objects                                                                                                  |
-| **Logical**         | ne              | At least two Objects                                                                                                  |
-| **Logical**         | isNull          | A single Object                                                                                                       |
-| **Logical**         | notNull         | A single Object                                                                                                       |
-| **Logical**         | ternary         | Three variables, the first variable must evaluate to a Boolean                                                        |
-| **Logical**         | and             | At least two boolean                                                                                                  |
-| **Logical**         | or              | At least two boolean                                                                                                  |
-| **Logical**         | not             | A single boolean                                                                                                      |
-| **Logical**         | not             | A single boolean                                                                                                      |
-| **Logical**         | gt              | Two individual whole numbers                                                                                          |
-| **Logical**         | lt              | Two individual whole numbers                                                                                          |
-| **Logical**         | startsWith      | Two strings, case insensitive.                                                                                        |
-| **Logical**         | endsWith        | Two strings, case insensitive.                                                                                        |
-| **Logical**         | includes        | Two strings, case insensitive OR one list and one string                                                              |
-| **Type Conversion** | b64             | Either a base64 encoded String, OR a byte array.                                                                      |
-| **Type Conversion** | binary          | Either a byte[], Map or String                                                                                        |
-| **Type Conversion** | length          | Either a byte[], List or String                                                                                       |
-| **Type Conversion** | substring       | Two to three variables.<br/>The first must be a String;<br/>the second must be an integer;<br/>the third is optional. |
-| **Type Conversion** | concat          | At least two Strings to be concatenated                                                                               |
-| **Type Conversion** | boolean         | A list of variables that can evaluate to a boolean                                                                    |
-| **Type Conversion** | double          | A list of variables that can evaluate to a double                                                                     |
-| **Type Conversion** | float           | A list of variables that can evaluate to a float                                                                      |
-| **Type Conversion** | int             | A list of variables that can evaluate to an integer                                                                   |
-| **Type Conversion** | long            | A list of variables that can evaluate to a long integer                                                               |
-| **Type Conversion** | text            | A list of variables that can evaluate to a String                                                                     |
-| **Type Conversion** | listOfMap       | Convert "a map of lists" to "a list of maps"                                                                          |
-| **Type Conversion** | updateListOfMap | Update "a list of maps" with "maps of lists"                                                                          |
-| **Type Conversion** | removeKey       | Remove one or more keys from a map or "list of maps"                                                                  |
-| **Type Conversion** | defaultValue    | If the first argument is null, return the 2nd argument                                                                |
-| **Type Conversion** | parseDate       | Parse a date string to ISO, Local or Milliseconds.                                                                    |
-| **Type Conversion** | parseDateTime   | Parse a date-time string to ISO, Local or Milliseconds.                                                               |
-| **Type Conversion** | validate        | Perform simple field validation. See details below.                                                                   |
+> **Numeric promotion** (arithmetic + `gt`/`lt`): whole numbers and whole-number strings promote
+> to long, decimals (and decimal strings) to double. The result type is decided over **all**
+> arguments before folding — any floating-point argument promotes the whole computation to
+> double; all-integral inputs keep exact 64-bit arithmetic, including integer division. Once a
+> double enters, precision follows IEEE-754 (integers exact to 2^53).
+
+#### Arithmetic
+
+`add`
+:   At least two numbers (all whole ⇒ exact long result; any decimal ⇒ double)
+
+`subtract`
+:   At least two numbers (all whole ⇒ exact long result; any decimal ⇒ double)
+
+`multiply`
+:   At least two numbers (all whole ⇒ exact long result; any decimal ⇒ double)
+
+`div`
+:   At least two numbers (all whole ⇒ integer division; any decimal ⇒ double division)
+
+`mod`
+:   Two individual numbers (all whole ⇒ long; any decimal ⇒ double)
+
+`increment`
+:   A single number (whole ⇒ long; decimal ⇒ double)
+
+`decrement`
+:   A single number (whole ⇒ long; decimal ⇒ double)
+
+`round`
+:   A number and optional decimal places (whole ≥ 0, default 0) — half-up rounding on the decimal representation (1.005 → 1.01 at 2 places)
+
+#### Generator
+
+`uuid`
+:   None
+
+`dateTime`
+:   None.
+
+`now`
+:   text(iso), text(local) or text(ms)
+
+#### Logical
+
+`eq`
+:   At least two Objects
+
+`ne`
+:   At least two Objects
+
+`isNull`
+:   A single Object
+
+`notNull`
+:   A single Object
+
+`ternary`
+:   Three variables, the first variable must evaluate to a Boolean
+
+`and`
+:   At least two boolean
+
+`or`
+:   At least two boolean
+
+`not`
+:   A single boolean
+
+`gt`
+:   Two individual whole numbers
+
+`lt`
+:   Two individual whole numbers
+
+`startsWith`
+:   Two strings, case insensitive.
+
+`endsWith`
+:   Two strings, case insensitive.
+
+`includes`
+:   Two strings, case insensitive OR one list and one string
+
+#### Collection
+
+`isEmpty`
+:   A single Collection, Map, String or array — true when it has no elements. Use `isNull` /
+    `notNull` for null checks; a null or unsupported input is an error.
+
+`getFirst`
+:   A single non-empty List — returns its first element.
+
+`getLast`
+:   A single non-empty List — returns its last element.
+
+#### Type Conversion
+
+`b64`
+:   Either a base64 encoded String, OR a byte array.
+
+`binary`
+:   Either a byte[], Map or String
+
+`length`
+:   Either a byte[], List or String
+
+`substring`
+:   Two to three variables. The first must be a String; the second must be an integer; the third is optional.
+
+`concat`
+:   At least two Strings to be concatenated
+
+`boolean`
+:   A list of variables that can evaluate to a boolean
+
+`double`
+:   A list of variables that can evaluate to a double
+
+`float`
+:   A list of variables that can evaluate to a float
+
+`int`
+:   A list of variables that can evaluate to an integer
+
+`long`
+:   A list of variables that can evaluate to a long integer
+
+`text`
+:   A list of variables that can evaluate to a String
+
+`listOfMap`
+:   Convert "a map of lists" to "a list of maps" — **order-preserving**: list order follows array index order (guaranteed)
+
+`updateListOfMap`
+:   Update "a list of maps" with "maps of lists"
+
+`removeKey`
+:   Remove one or more keys from a map or "list of maps". Syntax: `f:removeKey(source, text(key1), text(key2), …)` — see the worked example below.
+
+`defaultValue`
+:   If the first argument is null, return the 2nd argument
+
+`parseDate`
+:   Parse a date string to ISO, Local or Milliseconds.
+
+`parseDateTime`
+:   Parse a date-time string to ISO, Local or Milliseconds.
+
+`validate`
+:   Perform simple field validation. See details below.
 
 *DateTime plugins*
 
@@ -1697,6 +1813,21 @@ The list of maps may be a prior result of a ListOfMap operation.
 
 If the list sizes do not match, the plugin will return an empty list.
 
+*removeKey*
+
+The `removeKey(source, key1, key2, ...)` plugin removes one or more keys from a **map** — or from
+**every map element of a list** (non-map elements pass through unchanged). It returns a copy; the
+source is not modified. This is the natural idiom for hiding internal fields when reshaping data
+for external consumption:
+
+```yaml
+# strip the internal "description" field from every account in the list
+- 'f:removeKey(input.body.profile.account, text(description)) -> output.body.account'
+
+# remove several keys at once — one text(...) argument per key
+- 'f:removeKey(model.record, text(internal_id), text(audit_trail)) -> output.body.record'
+```
+
 For details, please refer to configuration example in header-and-json-path-test.yml and the unit test 
 `headerAndJsonPathTest()` in the FlowTests class of the event-script-engine module.
 
@@ -1812,7 +1943,7 @@ A top-level exception handler should not throw exception. Otherwise it may go in
 
 Therefore, we recommend that an exception handler should return regular result set in a PoJo or a Map object.
 
-An example of task-level exception handler is shown in the "HelloException.class" in the "task" folder
+An example of task-level exception handler is shown in the "HelloExceptionHandler.class" in the "task" folder
 where it set the status code in the result set so that the system can map the status code
 from the result set to the next task or to the HTTP output status code.
 
@@ -1829,7 +1960,18 @@ Another useful built-in function is a resilience handler with the route name `re
 
 It is a generic resilience handler. It will retry, abort, use an alternative path or exercise a brief backoff.
 
-![Resilience Handler](../diagrams/resilience-handler.png)
+```mermaid
+flowchart LR
+    event[/"event"/] --> fn["user<br>function"]
+    fn --> handler["resilience handler<br>(evaluate alternative path,<br>max attempts and<br>cumulative failures)"]
+    handler --> decision{"decision"}
+    decision -- "1. retry" --> fn
+    decision -- "2. abort with original error code" --> abort["abort"]
+    decision -- "3. alternate path based on<br>configured codes" --> alt["alternative<br>function"]
+    handler -- "enter backoff period<br>after extensive failures" --> backoff{{"backoff<br>period"}}
+    backoff -- "backoff period expired" --> decision
+    backoff -- "abort with status code 503" --> abort
+```
 
 > Figure 2 - Resilience Handler
 

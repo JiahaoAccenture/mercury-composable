@@ -65,12 +65,20 @@ to avoid breaking the system unintentionally.
 | simple.kafka.notification    | Publish an event to a Kafka topic (drop-n-forget / fail-fast) | minimalist-kafka |
 | sync.prepare                 | Sync-over-async facade: register the return route + serialize the request | sync-over-async  |
 | sync.await                   | Sync-over-async facade: block for the asynchronous response   | sync-over-async  |
+| graph.suspend                | Persist workflow state at a graph suspension point            | minigraph        |
+| graph.resume                 | Restore workflow state and continue past the suspension point | minigraph        |
+| v1.redis.persist.model       | Redis store for graph suspend (SETEX with native expiry)      | minigraph-state-redis |
+| v1.redis.retrieve.model      | Redis store for graph resume (atomic GETDEL consume)          | minigraph-state-redis |
 
-Routes from the last three rows belong to **opt-in extension modules** (`minimalist-kafka`,
-`sync-over-async`): they are reserved only when that module is on the classpath. `sync.prepare` and
-`sync.await` are the ready-made facade tasks an application wires into its own `sync-to-async` flow (see
+Routes from the last rows belong to **opt-in extension modules** (`minimalist-kafka`,
+`sync-over-async`, `minigraph-state-redis`) and the knowledge graph engine: they are reserved only
+when that module is on the classpath. `sync.prepare` and `sync.await` are the ready-made facade
+tasks an application wires into its own `sync-to-async` flow (see
 [Event Script Syntax](event-script/syntax.md)); like every reserved route, do not register your own
-function under these names.
+function under these names. The knowledge graph additionally reserves the node **alias**
+`suspend` (bound to the `graph.suspend` skill — traversal jumps to it by name, the `root`/`end`
+pattern), the node **property** `suspend`, and the engine-managed state key `model.run` — see
+[Workflow Suspension](knowledge-graph/workflow-suspension.md).
 
 ## Optional user defined functions
 
@@ -146,10 +154,19 @@ The trace ID is for end-to-end telemetry. Two header mechanisms are supported, b
 emitted outbound:
 
 - **X-Trace-Id** - carries the trace ID. When absent inbound, a fresh trace ID is generated at the edge.
+  The header **name** is configurable via `http.trace.id.header` (HTTP) and `kafka.trace.id.header`
+  (Kafka; unset by default - traceparent-only), for enterprises with their own convention.
 - **traceparent** (W3C Trace Context) - carries the trace ID *and* the caller's span ID. On inbound it
   **takes precedence** over `X-Trace-Id`: the trace ID segment becomes the Mercury trace ID and the parent
   span ID is adopted, so the trace continues from the upstream caller (span lineage across HTTP boundaries).
   On outbound the system emits `traceparent` built from this hop's own span, alongside `X-Trace-Id`.
+  The carrier **name** is configurable via `http.traceparent.header` / `kafka.traceparent.header`
+  (default `traceparent`) - for **backward compatibility with legacy systems only**, e.g. an intermediary
+  that strips the standard header: the same W3C value then travels under **both** names. Inbound, the
+  standard `traceparent` always wins; the custom name is read only when the standard is absent (its
+  presence means the caller already upgraded to the standard - a residual proprietary value is safely
+  ignored). Departure from the W3C/OpenTelemetry standard is discouraged - treat a custom name as a
+  temporary bridge (see [Observability](observability.md#impedance-config)).
 
 The framework does **not** echo the trace ID (or the correlation-id) back to the HTTP client.
 
@@ -176,6 +193,12 @@ http.correlation.id.header=X-Correlation-Id
 kafka.correlation.id.header=cid
 ```
 
+> **Per-entry overrides (impedance matching).** The keys above (and their trace-id counterparts
+> `http.trace.id.header` / `kafka.trace.id.header`) are the **global defaults**. A single application often
+> integrates with pre-existing or third-party systems that each use their own convention, so an individual
+> rest.yaml endpoint or kafka-flow-adapter.yaml binding may override them with the optional
+> `trace.id.header` and `correlation.id.header` keys - the per-entry value wins over the global one.
+
 Propagation:
 
 - **Captured at the edge.** REST automation (HTTP) and the Kafka Flow Adapter read the configured header;
@@ -185,10 +208,16 @@ Propagation:
   plumbing invisible to application code; the business one is the durable, end-to-end identifier.
 - **Preserved in the flow** as `model.cid`, and exposed to every function task as the read-only
   `my_correlation_id` header (`PostOffice.getMyCorrelationId()`).
-- **Carried to any touch point.** Every `PostOffice` send/RPC/broadcast stamps `my_correlation_id` on the
-  outgoing event (the same way the trace context is carried), so the correlation-id follows the call graph
-  automatically — across in-memory calls, the cross-instance **event-over-HTTP** hop (it rides in the
-  serialized envelope and the peer target reads it via `getMyCorrelationId()`), and into downstream systems.
+- **Carried to any touch point.** Every `PostOffice` send/RPC/broadcast carries the business
+  correlation-id on an **engine-managed envelope tag** — never as an envelope header — so the
+  correlation-id follows the call graph automatically: across in-memory calls, the cross-instance
+  **event-over-HTTP** hop (the tag rides in the serialized envelope and the peer's engine injects
+  `my_correlation_id` at delivery for `getMyCorrelationId()`), and into downstream systems. Metadata is
+  never transported as envelope headers; the `my_*` keys exist only in the injected input-header copy.
+- **Echoed on the HTTP response.** REST automation returns the request's business correlation-id
+  (inbound or edge-generated) on the response under the configured header name (default
+  `X-Correlation-Id`), so an edge caller can correlate without parsing the body. A response header of
+  the same name set by the function takes precedence.
 - **Handed downstream.** `simple.kafka.notification` stamps it on the outbound Kafka message (under
   `kafka.correlation.id.header`), and `AsyncHttpClient` emits it as the configured HTTP header
   (`http.correlation.id.header`) on downstream calls — in both cases an explicitly set header (e.g. a flow

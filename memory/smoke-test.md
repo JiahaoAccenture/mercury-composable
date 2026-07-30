@@ -41,3 +41,4 @@ review. Don't edit the questions to make them pass.
 |---|---|---|---|
 | 2026-06-14 | (v3.7.0 upgrade) | — | baseline — run the test to populate |
 | 2026-07-30 | 2026-07-30-145521 | 12/12 | none |
+| 2026-07-30 | 2026-07-30-170428 | 12/12 | none after latest-main merge |

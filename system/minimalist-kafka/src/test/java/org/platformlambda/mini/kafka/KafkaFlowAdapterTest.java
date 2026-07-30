@@ -28,13 +28,17 @@ import org.platformlambda.core.system.AutoStart;
 import org.platformlambda.core.system.PostOffice;
 import org.platformlambda.core.util.Utility;
 
+import org.platformlambda.core.util.W3cTrace;
+
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Standalone end-to-end proof of the minimalist-kafka building blocks (no Redis, no REST):
@@ -47,9 +51,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * stamps a {@code traceparent} from its own span; the adapter parses it and chains the sink flow onto
  * that trace, so the sink task observes the same trace-id the caller started with.</p>
  */
+// resource: the adapter, publisher and schema-registry client are process-wide singletons owned by
+// KafkaRuntime for the app lifetime - closed once in shutdown(), never per test
+@SuppressWarnings("resource")
 class KafkaFlowAdapterTest {
 
     private static final String TOPIC = "mini-test-topic";
+    // binding with per-entry 'trace.id.header' / 'correlation.id.header' overrides (legacy upstream)
+    private static final String LEGACY_TOPIC = "legacy-test-topic";
     // The two Confluent-wire-format e2e cases: JSON Schema (JSON_TOPIC -> json-sink-flow -> JsonSinkTask)
     // and Avro (AVRO_TOPIC -> avro-sink-flow -> AvroSinkTask). Each has its own flow + sink so the two never
     // share mutable state; the codec's ability to decode both by embedded schema id is proven in SchemaCodecTest.
@@ -72,6 +81,7 @@ class KafkaFlowAdapterTest {
     static void boot() throws Exception {
         kafka = new EmbeddedKafka();
         KafkaTestSupport.createTopic(kafka.bootstrapServers(), TOPIC);
+        KafkaTestSupport.createTopic(kafka.bootstrapServers(), LEGACY_TOPIC);
         KafkaTestSupport.createTopic(kafka.bootstrapServers(), JSON_TOPIC);
         KafkaTestSupport.createTopic(kafka.bootstrapServers(), AVRO_TOPIC);
         // created before AutoStart.main() starts the topic-pattern consumer's subscribe(Pattern), same as
@@ -88,7 +98,8 @@ class KafkaFlowAdapterTest {
         AutoStart.main(new String[0]);
         // KafkaFlowAutoStart (@MainApplication) runs after the engine is up: it sets the publisher and
         // starts the adapter. A non-null adapter is our readiness signal.
-        long deadline = System.currentTimeMillis() + 20000;
+        // generous for busy CI executors - the poll returns as soon as the adapter is ready
+        long deadline = System.currentTimeMillis() + 90000;
         while (KafkaRuntime.adapter() == null && System.currentTimeMillis() < deadline) {
             Utility.getInstance().sleep(100);
         }
@@ -134,6 +145,107 @@ class KafkaFlowAdapterTest {
                 "business cid surfaced to the task as model.cid / getMyCorrelationId() through the flow engine");
         assertEquals("{\"hello\":\"kafka\"}", received.get("body"), "body round-tripped through Kafka");
         assertEquals(TRACE_ID, received.get("traceId"), "trace-id stayed continuous across the Kafka hop");
+    }
+
+    @Test
+    void notificationStampsTraceContextUnderBothNames() throws Exception {
+        KafkaSinkTask.RECEIVED.clear();
+        // kafka.traceparent.header=x-kafka-trace in this test suite: the notification stamps the SAME
+        // W3C value under both the standard "traceparent" and the custom name, so the context survives
+        // middleware that mishandles the standard header while compliant consumers keep working
+        String cid = Utility.getInstance().getUuid();
+        PostOffice po = PostOffice.trackable("unit.test", TRACE_ID, "TEST /dual/stamp");
+        po.send(new EventEnvelope().setTo("simple.kafka.notification")
+                .setHeader(KafkaHeaders.TOPIC, TOPIC)
+                .setHeader(KafkaHeaders.CORRELATION_ID, cid)
+                .setBody("{\"hello\":\"dual\"}".getBytes(StandardCharsets.UTF_8))
+                .setTraceId(TRACE_ID).setTracePath("TEST /dual/stamp"));
+
+        Map<String, Object> received = KafkaSinkTask.RECEIVED.poll(25, TimeUnit.SECONDS);
+        assertNotNull(received, "the sink flow should receive the message");
+        String standard = (String) received.get("traceparent");
+        assertNotNull(standard, "the standard traceparent header is stamped");
+        assertTrue(standard.contains(TRACE_ID), "the stamped traceparent continues the caller's trace");
+        assertEquals(standard, received.get("customTraceparent"),
+                "the same W3C value must be stamped under the custom kafka.traceparent.header name");
+    }
+
+    @Test
+    void adapterAdoptsTraceContextFromCustomHeaderName() throws Exception {
+        KafkaSinkTask.RECEIVED.clear();
+        // inbound impedance matching: an upstream carries W3C trace context ONLY under the custom
+        // name (legacy middleware stripped the standard header); the adapter falls back to it
+        String customTraceId = "aaaa2222333344445555666677778888";
+        Map<String, byte[]> recordHeaders = new HashMap<>();
+        recordHeaders.put("x-kafka-trace",
+                W3cTrace.format(customTraceId, "aaaabbbbccccdddd").getBytes(StandardCharsets.UTF_8));
+        KafkaRuntime.publisher().publishSync(TOPIC, null, recordHeaders,
+                "{\"hello\":\"custom\"}".getBytes(StandardCharsets.UTF_8), 10000);
+
+        Map<String, Object> received = KafkaSinkTask.RECEIVED.poll(25, TimeUnit.SECONDS);
+        assertNotNull(received, "the sink flow should receive the message");
+        assertEquals(customTraceId, received.get("traceId"),
+                "the custom traceparent name delivers the context when the standard header is absent");
+    }
+
+    @Test
+    void standardTraceparentWinsOverCustomHeaderName() throws Exception {
+        KafkaSinkTask.RECEIVED.clear();
+        // the standards position: a well-formed standard traceparent means the upstream already
+        // speaks W3C/OTel - a residual proprietary header alongside it is safely ignored
+        String residualTraceId = "aaaa3333444455556666777788889999";
+        String standardTraceId = "bbbb3333444455556666777788889999";
+        Map<String, byte[]> recordHeaders = new HashMap<>();
+        recordHeaders.put("x-kafka-trace",
+                W3cTrace.format(residualTraceId, "aaaabbbbccccdddd").getBytes(StandardCharsets.UTF_8));
+        recordHeaders.put(W3cTrace.TRACEPARENT,
+                W3cTrace.format(standardTraceId, "ddddccccbbbbaaaa").getBytes(StandardCharsets.UTF_8));
+        KafkaRuntime.publisher().publishSync(TOPIC, null, recordHeaders,
+                "{\"hello\":\"standard\"}".getBytes(StandardCharsets.UTF_8), 10000);
+
+        Map<String, Object> received = KafkaSinkTask.RECEIVED.poll(25, TimeUnit.SECONDS);
+        assertNotNull(received, "the sink flow should receive the message");
+        assertEquals(standardTraceId, received.get("traceId"),
+                "the standard W3C traceparent wins; the custom name is a fallback only");
+    }
+
+    @Test
+    void legacyHeaderOverridesCaptureTraceAndCorrelationId() throws Exception {
+        KafkaSinkTask.RECEIVED.clear();
+        // a legacy upstream publishes its own header names and no W3C traceparent; the binding's
+        // 'trace.id.header' / 'correlation.id.header' overrides capture both
+        String legacyCid = "legacy-cid-" + Utility.getInstance().getUuid();
+        String legacyTraceId = "legacy-trace-0001";
+        Map<String, byte[]> recordHeaders = new HashMap<>();
+        recordHeaders.put("X-Correlation-ID", legacyCid.getBytes(StandardCharsets.UTF_8));
+        recordHeaders.put("X-Legacy-Trace", legacyTraceId.getBytes(StandardCharsets.UTF_8));
+        KafkaRuntime.publisher().publishSync(LEGACY_TOPIC, null, recordHeaders,
+                "{\"hello\":\"legacy\"}".getBytes(StandardCharsets.UTF_8), 10000);
+
+        Map<String, Object> received = KafkaSinkTask.RECEIVED.poll(25, TimeUnit.SECONDS);
+        assertNotNull(received, "the sink flow should receive the legacy message");
+        assertEquals(legacyCid, received.get("myCid"),
+                "business cid captured from the per-binding 'correlation.id.header' override");
+        assertEquals(legacyTraceId, received.get("traceId"),
+                "trace-id captured from the per-binding 'trace.id.header' override (no traceparent sent)");
+    }
+
+    @Test
+    void traceparentTakesPrecedenceOverLegacyTraceHeader() throws Exception {
+        KafkaSinkTask.RECEIVED.clear();
+        // when a well-formed W3C traceparent is present, it wins over the configured trace-id header
+        String w3cTraceId = "99998888777766665555444433332222";
+        Map<String, byte[]> recordHeaders = new HashMap<>();
+        recordHeaders.put("X-Legacy-Trace", "should-not-win".getBytes(StandardCharsets.UTF_8));
+        recordHeaders.put(W3cTrace.TRACEPARENT,
+                W3cTrace.format(w3cTraceId, "aaaabbbbccccdddd").getBytes(StandardCharsets.UTF_8));
+        KafkaRuntime.publisher().publishSync(LEGACY_TOPIC, null, recordHeaders,
+                "{\"hello\":\"w3c\"}".getBytes(StandardCharsets.UTF_8), 10000);
+
+        Map<String, Object> received = KafkaSinkTask.RECEIVED.poll(25, TimeUnit.SECONDS);
+        assertNotNull(received, "the sink flow should receive the message");
+        assertEquals(w3cTraceId, received.get("traceId"),
+                "a well-formed traceparent takes precedence over the configured trace-id header");
     }
 
     @Test

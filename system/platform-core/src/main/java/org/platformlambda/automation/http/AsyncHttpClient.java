@@ -88,7 +88,6 @@ public class AsyncHttpClient implements TypedLambdaFunction<EventEnvelope, Void>
     private static final String HEAD = "HEAD";
     private static final String X_STREAM_ID = "x-stream-id";
     private static final String X_TTL = "x-ttl";
-    private static final String TRACE_ID_HEADER = "X-Trace-Id";
     private static final String CONTENT_TYPE = "content-type";
     private static final String CONTENT_LENGTH = "content-length";
     private static final String X_CONTENT_LENGTH = "x-content-length";
@@ -189,7 +188,11 @@ public class AsyncHttpClient implements TypedLambdaFunction<EventEnvelope, Void>
         if (relaxedHeaderSize) {
             client = client.httpResponseDecoder(spec -> spec.maxHeaderSize(16 * 1024));
         }
-        client = client.responseTimeout(Duration.ofSeconds(request.getTimeoutSeconds()));
+        // one extra second of grace over the request TTL so a peer that spends
+        // its whole TTL and then replies (e.g. an Event-over-HTTP 408 sent AT
+        // the deadline) is still readable; the caller's own RPC timeout - not
+        // this wire-level read timeout - governs the user-visible deadline
+        client = client.responseTimeout(Duration.ofSeconds(request.getTimeoutSeconds() + 1L));
         if (request.isSecure()) {
             if (request.isTrustAllCert()) {
                 Http11SslContextSpec http11Context = Http11SslContextSpec.forClient()
@@ -308,35 +311,59 @@ public class AsyncHttpClient implements TypedLambdaFunction<EventEnvelope, Void>
     private void updateHttpHeaders(PostOffice po, AsyncHttpRequest request, HttpHeaders http, String spanId) {
         // set user-agent for this HTTP client
         http.set(USER_AGENT, USER_AGENT_NAME);
+        setContentLengthHeader(request, http);
+        applyRequestAndSessionHeaders(request, http);
+        applyTraceHeaders(po, http, spanId);
+        applyBusinessCorrelationId(po, request, http);
+        setCookies(request, http);
+    }
+
+    private void setContentLengthHeader(AsyncHttpRequest request, HttpHeaders http) {
         // set content-length, including zero, if needed
         var method = request.getMethod();
         if (request.isContentLengthDefined() && request.getStreamRoutes().isEmpty() &&
                 (POST.equals(method) || PUT.equals(method) || PATCH.equals(method))) {
             http.set(CONTENT_LENGTH, request.getContentLength());
         }
+    }
+
+    private void applyRequestAndSessionHeaders(AsyncHttpRequest request, HttpHeaders http) {
         Map<String, String> reqHeaders = request.getHeaders();
         // convert authentication session info into HTTP request headers
-        Map<String, String> sessionInfo = request.getSessionInfo();
-        reqHeaders.putAll(sessionInfo);
+        reqHeaders.putAll(request.getSessionInfo());
         for (Map.Entry<String, String> kv: reqHeaders.entrySet()) {
             if (permittedHttpHeader(kv.getKey())) {
                 http.set(kv.getKey(), kv.getValue());
             }
         }
+    }
+
+    private void applyTraceHeaders(PostOffice po, HttpHeaders http, String spanId) {
         // Trace headers (X-Trace-Id / W3C "traceparent") copied from the request above are left intact when
         // this call is not being traced: an explicitly developer-set trace header is an intentional act (e.g.
         // handing a trace context to a 3rd-party system, or forwarding an upstream trace) and must propagate.
         // When this call IS traced, the framework's own current trace context takes precedence below so the
-        // downstream span chains to this caller's span - and since a traced request's context is itself adopted
+        // downstream span chains to this caller's span. Since a traced request's context is itself adopted
         // from the upstream X-Trace-Id/traceparent at ingress, the upstream trace still propagates.
         String traceId = po.getTraceId();
         if (traceId != null) {
-            http.set(TRACE_ID_HEADER, traceId);
+            // use the configured trace-id header name (http.trace.id.header, default X-Trace-Id)
+            http.set(HttpRouter.getTraceIdHeader(), traceId);
         }
         String traceparent = W3cTrace.format(traceId, spanId);
         if (traceparent != null) {
             http.set(W3cTrace.TRACEPARENT, traceparent);
+            // when a custom traceparent header name is configured (http.traceparent.header), stamp the
+            // same value under that name too, so the W3C trace context survives an intermediary that
+            // strips the standard header
+            String customTraceparent = HttpRouter.getTraceparentHeader();
+            if (!W3cTrace.TRACEPARENT.equalsIgnoreCase(customTraceparent)) {
+                http.set(customTraceparent, traceparent);
+            }
         }
+    }
+
+    private void applyBusinessCorrelationId(PostOffice po, AsyncHttpRequest request, HttpHeaders http) {
         // propagate the business correlation-id downstream (unless the caller set the header explicitly)
         String businessCorrelationId = po.getMyCorrelationId();
         if (businessCorrelationId != null) {
@@ -345,6 +372,9 @@ public class AsyncHttpClient implements TypedLambdaFunction<EventEnvelope, Void>
                 http.set(cidHeader, businessCorrelationId);
             }
         }
+    }
+
+    private void setCookies(AsyncHttpRequest request, HttpHeaders http) {
         // set cookies if any
         Map<String, String> cookies  = request.getCookies();
         StringBuilder sb = new StringBuilder();

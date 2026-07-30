@@ -22,6 +22,209 @@ in that ADR's own *Rationale* section.
 
 ---
 
+## ADR-0011 — CompileGraph is the mandatory deployment gate for graph models (CompileFlows parity) {#adr-0011}
+**Status:** Accepted · **Date:** 2026-07-29T19:03:28.000Z · **Serves:** vision-mercury-composable · **Formalizes:** compilegraph-mandatory-gate
+<!-- id: adr-0011 | status: accepted -->
+
+**Abstract.** A deployed graph model is executable at `POST /api/graph/{graph-id}` **only**
+when it is listed in the graph manifest (`graph.model.automation`) **and** passes the
+CompileGraph quality gate at startup — a graph that fails the gate, or is not listed,
+answers **HTTP-404 as if the model does not exist**, and the lazy, per-request loading of
+deployed models is removed. Like `flows.yaml`, the manifest carries the location of its
+own models (an optional `location` entry, default `classpath:/graph`) — there is no
+separate application property. Validation follows **two explicit lanes**: *production* =
+models → CompileGraph → deployed graphs → GraphExecutor, which **trusts the gate** and
+drops per-request re-validation of gate-guaranteed rules, keeping only data-driven runtime
+guards (store-record contents, dynamic jump targets, loop detection); *dry-run* = drafts
+in the temp workspace → UI CLI input validation at node create/update → GraphTraveler with
+full runtime validation. The gate's whole-graph rules live in a reusable
+`GraphModelValidator`, which the playground's `run` command also invokes as a **pre-run
+quality check** — draft authoring deliberately allows partial models, but the moment the
+author asks to run, the contract must hold.
+
+**Rationale.** This is the `CompileFlows` precedent applied to Layer 3: an invalid flow
+never becomes executable, and the graph engine now gives the same guarantee — previously a
+manifest graph that *failed* validation could still be resurrected by the lazy-load
+fallback and executed unvalidated, which is untenable for field production. Compiled-or-404
+(identical for failed and unlisted models) leaks nothing about why a model is absent, and
+turning the deploy folder into a pure data directory removes it as a direct execution
+vector. Startup-time rejection converts an entire class of runtime stalls and mid-run
+errors (missing `end` node, checkpoint without a continuation edge, dead-end suspend node)
+into immediate, logged deployment failures — while the same rules surface to graph authors
+at dry-run `run` time, so the deployment contract is learned in the playground, not
+discovered in the field. The consequences are accepted deliberately: the manifest is now a
+**requirement** (a one-line migration for installations that relied on lazy loading, with
+the `classpath:/graph` default preserving existing layouts and an obsolete-key warning for
+the retired `location.graph.deployed` property), hot-dropping a JSON file into the deploy
+folder no longer works (deployment is an explicit, restart-scoped act — consistent with
+the governance lifecycle the Vision calls for), and the walkers' suspend/resume guards are
+now exercised end-to-end only on the dry-run lane (the static validator carries the
+per-rule coverage).
+
+---
+
+## ADR-0010 — Graph workflow suspension: short runs + an external state store, encapsulated in skills {#adr-0010}
+**Status:** Accepted · **Date:** 2026-07-29T02:00:00.000Z · **Serves:** vision-mercury-composable · **Formalizes:** graph-suspend-resume-design
+<!-- id: adr-0010 | status: accepted -->
+
+**Abstract.** A long-running business process with human checkpoints (approval,
+intervention, inbox notification) is expressed as a **sequence of short graph runs**: at a
+suspension point the run persists its workflow state — the `model` namespace plus
+traversal bookkeeping — to an **external state store** keyed by the business correlation
+ID with a designer-chosen TTL, then completes normally; a later request with the same
+correlation ID restores that state and continues past the checkpoint without re-executing
+it. The mechanics are **encapsulated in two skills** — `graph.suspend` and `graph.resume`,
+supersets of `graph.task` that invoke a pluggable store function named by the node's
+`task` property with a fixed put/get contract — so suspension nodes carry **no data
+mapping**. The node alias `suspend` is **reserved** (the `root`/`end` pattern): traversal
+routes to it by name when a node marked with the reserved property `suspend=true`
+completes; node *types* (`Suspend`/`Resume`/`Suspensible`) remain visual convention —
+**the skill defines behavior**. Store retrieval **consumes the record atomically**
+(at-most-once resume); reserved model keys never persist; a suspension point must be the
+sole active branch.
+
+**Rationale.** Parking a live graph instance for a multi-day approval would pin memory,
+defeat the flow ttl, and not survive a restart — the short-run model keeps the engine's
+in-memory instance lifecycle untouched and makes cross-instance resume free (any pod
+sharing the store can continue the workflow). Skill encapsulation was chosen over
+node-level data mapping because the mapping variant required special-casing the mapping
+grammar per node type and left the resume jump-target with no channel; a fixed store
+contract also makes the persistence seam documentable and replaceable (Redis ships as an
+optional extension module — never an engine dependency; engine tests use a temp-file
+store). The reserved-alias routing reuses the existing jump-by-name directive vocabulary
+instead of introducing edge classification, at the accepted cost of one suspend node per
+graph. Consume-on-retrieve was preferred over keep-until-TTL so a duplicate resume cannot
+double-execute a continuation; workflows needing stronger crash guarantees may implement
+keep-until-ack semantics in a custom store. Alternatives rejected: engine-managed timers
+or parked instances (memory + restart fragility); reusing the Event Script `ext:`
+fire-and-forget external-state contract (durability requires a synchronous
+acknowledgement); persisting `{node}.result` scratch (the model is the workflow's single
+durable memory — an explicit, teachable rule).
+
+---
+
+## ADR-0009 — Registration metadata is a cross-language contract; carriers are per-language idioms {#adr-0009}
+**Status:** Accepted · **Date:** 2026-07-26T01:40:00.000Z · **Serves:** vision-mercury-composable · **Formalizes:** registration-metadata-contract
+<!-- id: adr-0009 | status: accepted -->
+
+**Abstract.** Declarative registration — `@PreLoad` and its family (entry points, websocket
+services, Event Script plugins, graph fetch features) — is governed by **one canonical
+metadata model with fixed semantics**, specified in
+`docs/guides/registration-metadata-contract.md` and proven by **golden vectors shared
+verbatim** between engine repositories. How each language *carries* the metadata is an
+idiom — Java annotations discovered by runtime classpath scan, Rust attribute macros
+collected by link-time inventory, Python/Node decorators discovered by explicit
+package/module walks — but the model and its semantics are the contract: attach at
+definition / resolve at boot (`envInstances`); the `OptionalService` condition grammar;
+order-free marker stacking; one conflict policy (explicit wins over declarative;
+duplicates WARN + last-wins); extension-point naming (an explicit positional name, or
+derivation from the declaration such that idiomatic declarations in every language yield
+the same registered name); plugins are Event Script capabilities (flow vocabulary) and are
+never conditionally gated, while features honor gating; the boot sequence
+(discover → register → override → resolve → validate → route table); explicit
+loud-failure discovery; and misuse as a first-class, tested error surface.
+
+**Rationale.** The Rust port's first annotation pass proved that porting the *mechanism*
+without fixing the *semantics* produces drift invisible to any single repository: built-ins
+bypassing the extension points they exemplify, conflict policies diverging (skip-first-wins
+vs last-wins), gating support absent where the reference has it, and an attribute
+stack-order requirement Java never had. Each was individually small; together they meant a
+developer — or an AI agent — could not transfer knowledge between engines, and every future
+port would re-diverge independently. The same problem was already solved once for the wire
+format (ADR-referenced spec + golden vectors, v4.10.0): fixing the contract in a
+language-neutral artifact with executable conformance is what made the four-way interop
+matrix provable. This ADR applies that method to the declaration surface. The maintainer's
+two governing directives are part of the decision: developers must see **consistent,
+decoupled** registration in every language, and the Rust port is the **best-practice
+template** for the Python and Node ports.
+
+**Alternatives.** (a) *Per-port judgment calls documented in each repo* — rejected: that is
+the drift this ADR eliminates; N-of-1 documentation cannot be conformance-tested.
+(b) *A shared runtime registry service* (as the original external blueprint's open item
+suggested for multi-process parity) — rejected: registration is process-local by design in
+a self-contained composable application; cross-process discovery is the service mesh's
+concern and stays opt-in. (c) *Exporting the full live registry for byte comparison* —
+rejected in favor of a fixed fixture set: engines legitimately differ in framework
+built-ins (no Spring in Rust, no Kafka mesh), so whole-registry comparison would pin
+incidental surface, not contract.
+
+**Consequences.** New ports implement the carrier idiomatically, then pass the three
+golden-vector suites (`registration-vectors/core.json`, `plugin.json`, `feature.json`)
+before their declaration surface is considered done; every capability field a port cannot
+honor is documented as N/A where developers would meet it, never silently dropped. The
+engines accept a small ongoing cost: vector files are maintained verbatim in every
+repository, and semantic changes to registration must update the contract page, the
+vectors, and all engines in lock-step — which is precisely the point.
+
+---
+
+## ADR-0008 — Synchronous AI-companion endpoint: in-band command outcome + live tee {#adr-0008}
+**Status:** Accepted · **Date:** 2026-07-18T18:13:53.000Z · **Serves:** vision-mercury-composable
+<!-- id: adr-0008 | status: accepted -->
+
+**Abstract.** Add an **additive** synchronous companion endpoint —
+`POST /api/companion/{session-id}/sync` — that returns the command's **outcome in-band** as a
+structured envelope `{ ok, command, output, error, result }`, alongside the existing fire-and-forget
+`POST /api/companion/{session-id}` (which returns only `{status:"accepted"}` and streams the real
+outcome to the WebSocket console). The synchronous handler also **tees** each output line to the
+session's WebSocket `.out`, so a human at the Playground — and, via the command service's existing
+subscriber fan-out, any `session subscribe`d session — sees the same output live. The existing
+endpoint and the human console are unchanged. A **reference implementation is proven in the Rust
+port** (`acn-ericlaw/mercury`); this ADR proposes adopting it in the Java engine.
+
+**Rationale.** The current companion surface is a **write-only command bus**: `PostCompanionCommand`
+dispatches the command fire-and-forget and returns an acknowledgement; the actual result — success
+text *and errors* — reaches only the WebSocket console. An **AI agent** driving the endpoint over HTTP
+is therefore blind to what happened: to learn the effect it must poll `GET /api/graph/session/{id}`
+(shape) and `GET /api/inspect/{id}/{key}` (state), and a *rejected* command leaves the model unchanged
+with no error at all — so polling cannot even distinguish "no-op" from "rejected". This was not
+hypothetical: in an AI-companion validation exercise a capable agent posted an invalid `graph.math`
+node, received HTTP 200, and never saw the engine's `node … does not have if:, then: or else:` →
+*graph traversal aborted*; it only inferred failure from empty inspect state. A true AI companion needs
+**synchronous, self-describing feedback** — send a command, get back what happened — so it can
+**self-correct autonomously** instead of relying on a human to relay the console. The tee makes the
+same endpoint a **real-time human+AI collaboration** surface: an architect and an AI draft a graph on
+one live session while a product owner (subscribed) watches; work suspends/resumes across sprints via
+`export`/`import`. **Mechanism (proven in Rust, mirrorable in Java):** the synchronous handler
+dispatches the command to the command service via **request/response RPC** (Java `po.request` /
+`AsyncInbox`) with a **private capture route** (`platform.register`) supplied as the command's `out`;
+it drains the captured lines, classifies `ok`/`error`, folds a `run`/`inspect` result into `result`,
+and returns the envelope — while fire-and-forget forwarding each line to the session's real `.out` for
+the live view. It reuses existing primitives; the `say()`-based command functions are untouched.
+**Alternatives.** An **MCP tool server** (typed tools) was considered and deferred — heavier, and it
+forks the shared human/AI text surface into an AI-only one; the in-band envelope captures most of the
+value while keeping one surface. Having the command handler **return its transcript** directly (no
+capture route) is cleaner but threads an output sink through every command function; deferred.
+**Consequences.** Additive and backward-compatible (the fire-and-forget route and the console stream
+are unchanged). The **envelope shape is a cross-vendor contract** — the Rust and Java ports should
+agree on it; open points: whether a large `run` `output.body` is inlined or spilled to
+`GET /api/inspect` (mirror the existing large-payload rule), and whether `inspect` results fold the
+same way. Refines the companion surface introduced with the MiniGraph Playground; bounded by ADR-0001
+(decoupled functions — the endpoint is just another route) and ADR-0003 (Map-or-PoJo over
+EventEnvelope — the envelope is a Map). **Reference implementation** (Rust port,
+`acn-ericlaw/mercury`): the endpoint (`post.companion.command.sync`, dev-gated), an integration test
+(`companion_sync_returns_outcome_in_band`), a design note (`docs/design/ai-companion-sync.md`), and a
+**live multi-party demo** in which a fresh AI companion built + ran a decision graph autonomously via
+`/sync` — self-correcting from in-band errors (including a retired-skill dead end) while an architect
+and a subscribed product owner watched in real time. **Now implemented in this Java engine**:
+`PostCompanionCommandSync` (route `post.companion.command.sync`, dev-gated) with `CompanionSyncTest`,
+mirroring the Rust design — a private per-call capture route (`registerPrivate`) supplied as the
+command's `out`, RPC to the singleton command handler, a FIFO sentinel to mark the buffer drained, and
+a best-effort tee to the session's WebSocket `.out`. **End-of-transmission refinement (both ports):**
+the sentinel is correct only for *synchronous* commands, which emit all output before the handler
+replies. A traversal (`run`) is *asynchronous* — the handler launches the traveler and replies
+immediately, then the traveler streams its output afterwards — so a post-reply sentinel races (and
+usually beats) that tail and truncates the capture. A traversal is therefore drained on the traveler's
+**terminal line** (`Graph traversal completed in N ms` | `Graph traversal aborted`), which is always
+emitted last. To make that signal reliable, **every `run` now ends with one terminal line**: the
+early-failure paths (no instance yet, missing root/end node) emit their reason *then* the canonical
+`Graph traversal aborted`, so a companion mistake such as `run` before `instantiate` returns promptly
+(`ok:false`) instead of waiting out the timeout. The bounded wait is only a safety net; correctness
+comes from the signal. This keeps the REST contract byte-identical across the Rust and Java engines —
+the companion surface is language-neutral.
+
+---
+
 ## ADR-0007 — Event Script configuration is preferred over code for orchestration {#adr-0007}
 **Status:** Accepted · **Date:** 2026-06-27T15:45:00.000Z · **Serves:** vision-mercury-composable
 <!-- id: adr-0007 | status: accepted | formalizes: event-script-over-code -->

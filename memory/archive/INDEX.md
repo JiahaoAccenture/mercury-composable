@@ -68,3 +68,22 @@
 - minimalist-kafka-schema-registry — minimalist-kafka Schema Registry support shipped: Confluent serdes as library, subject/version-driven producer — faded - feature shipped (PR #129); described by module code and README — 2026-Q3.md
 - snyk-oss-dependency-update-2026-07 — Repo-wide Snyk OSS dependency update shipped in 4.6.1 (spring-boot 4.1.0/3.5.16, netty 4.2.15, tomcat 11.0.23, vertx 5.1.3) — completed - shipped in 4.6.1 — 2026-Q3.md
 - thread-guava-failureaccess-field-fix — Guava failureaccess field fix completed (b47fac39); CAVEAT preserved: do NOT remove the explicit failureaccess:1.0.3 pins - they guarantee the class under strict field resolution — completed - field builds green through the 4.6.2 scans; v4.6.2 released — 2026-Q3.md
+- thread-release-4.6.1-field-scan — (COMPLETED 2026-07-10 review: v4.6.1 released 2026-07-06; field SCA + Snyk re-scans ran an… — completed and swept (2026-07-10 review): shipped in 4.6.x releases — 2026-Q3.md
+- thread-csfle-field-encryption — (COMPLETED 2026-07-10 review: CSFLE committed and shipped — CsfleLocalRoundTripTest + — completed and swept (2026-07-10 review): shipped in 4.6.x releases — 2026-Q3.md
+- release-4-6-2-shipped — Release 4.6.2 — SHIPPED 2026-07-07 (tag `v4.6.2` on merge commit `56ac1067`; PRs #140 reme… — faded after archive_window during 2026-07-13 review — 2026-Q3.md
+- release-4-7-0-shipped — Release 4.7.0 — SHIPPED 2026-07-08 (tag `v4.7.0` on merge commit `e41a20b7`; PRs #146 feat… — faded — 2026-Q3.md
+- conv-instance-count-pattern — Worker-instance count encodes the concurrency pattern (Eric, 2026-07-13): `instances=1` is… — faded — 2026-Q3.md
+- thread-release-4-8-3-tag-deferred — (release in flight — 2026-07-13; CLOSED same day) v4.8.3 bumped for field pipeline test; T… — faded — 2026-Q3.md
+- snyk-4-8-2-remediation — Snyk gate rejected v4.8.2 in the field (2026-07-13) — remediated and MERGED (PR #168, merg… — faded — 2026-Q3.md
+- release-4.6.1-security-patch — Release 4.6.1 — security + maintenance patch on top of 4.6.0 (2026-07-06, branch `chore/re… — faded — 2026-Q3.md
+- test-config-injection-exact-key — Test config injection: use the EXACT config key as a System property, never a `${VAR}` ref… — faded — 2026-Q3.md
+- thread-release-4-8-6 — (release in flight — 2026-07-14; CLOSED same day) v4.8.6 SHIPPED via the normal flow — — faded — 2026-Q3.md
+- thread-release-4-8-5 — (release in flight — 2026-07-14; CLOSED same day) v4.8.5 SHIPPED via the normal flow — — faded — 2026-Q3.md
+- thread-release-4-8-4-tag-deferred — (release in flight — 2026-07-13; CLOSED same day) v4.8.4 SHIPPED via the normal flow — — faded — 2026-Q3.md
+- docs-site-material-theme — Docs site: Material for MkDocs (switched from readthedocs 2026-07-20, mirroring the Rust — faded — 2026-Q3.md
+- log-context-on-by-default — Application log context is ON by default (2026-07-22, Eric via leadership request; branch — faded — 2026-Q3.md
+- thread-release-4-10-0 — (release in flight — 2026-07-22; CLOSED same day) v4.10.0 SHIPPED via the normal flow — — faded — 2026-Q3.md
+- thread-release-4-9-1 — (release in flight — 2026-07-21; CLOSED same day) v4.9.1 SHIPPED via the normal flow — — faded — 2026-Q3.md
+- thread-release-4-10-2 — (release in flight — 2026-07-23; CLOSED same day) v4.10.2 SHIPPED AND PUBLISHED in — completed thread swept — 2026-Q3.md
+- thread-release-4-10-1 — (release in flight — 2026-07-23; CLOSED same day) v4.10.1 SHIPPED via the normal — completed thread swept — 2026-Q3.md
+- thread-telemetry-parity-auth — (in flight — 2026-07-23; COMPLETE same day) Post-4.10.0 telemetry presentation parity + — completed thread swept — 2026-Q3.md

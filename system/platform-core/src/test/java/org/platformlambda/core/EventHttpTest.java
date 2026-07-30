@@ -89,7 +89,8 @@ class EventHttpTest extends TestBase {
     void eventOverHttpPropagatesTraceAndCorrelationId() throws InterruptedException {
         // The whole EventEnvelope is serialized into the HTTP body over the "event over HTTP" hop, so the
         // peer's target function continues the same trace (traceId exposed as my_trace_id) and receives the
-        // caller's business correlation-id (carried as the my_correlation_id reserved header by touch()).
+        // caller's business correlation-id (carried by the engine-managed envelope tag, injected as the
+        // my_correlation_id read-only key at delivery).
         final BlockingQueue<Map<String, String>> captured = new ArrayBlockingQueue<>(1);
         final String captureRoute = "event.http.trace.capture";
         TypedLambdaFunction<EventEnvelope, Object> capture = (headers, event, instance) -> {
@@ -346,5 +347,193 @@ class EventHttpTest extends TestBase {
         // validate that session information is passed by the demo authentication service "event.api.auth"
         assertEquals("demo", map.getElement("headers.user"));
         assertEquals(numberThree, map.getElement("body"));
+    }
+
+    @Test
+    void remoteTimeoutArrivesInBand() throws InterruptedException {
+        // Regression: the HTTP client's wire-level read timeout must outlive the
+        // request TTL. A peer that spends its whole TTL and replies with its own
+        // in-band 408 AT the deadline (~ttl + a few ms) was previously killed by a
+        // ReadTimeoutException at floor(ttl/1000) seconds - a misplaced parenthesis
+        // in AsyncHttpRequest.getTimeoutSeconds() (max(1, ms)/1000 instead of
+        // max(1, ms/1000) with ceiling), surfacing as status=500 with a null body.
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        long timeout = 1500;
+        Map<String, String> securityHeaders = new HashMap<>();
+        securityHeaders.put("Authorization", "demo");
+        PostOffice po = PostOffice.trackable("unit.test", "9003", "TEST /remote/event/timeout");
+        EventEnvelope event = new EventEnvelope().setTo(HELLO_SLEEPER)
+                .setBody(Map.of("sleep_ms", 3000));
+        Future<EventEnvelope> response = po.asyncRequest(event, timeout, securityHeaders,
+                "http://127.0.0.1:"+port+"/api/event", true);
+        response.onSuccess(bench::add);
+        EventEnvelope result = bench.poll(timeout + 2000, TimeUnit.MILLISECONDS);
+        assertNotNull(result);
+        assertEquals(408, result.getStatus(),
+                "the remote's own timeout must arrive in-band, not die on the wire: " + result.getBody());
+        assertInstanceOf(String.class, result.getBody());
+        assertTrue(String.valueOf(result.getBody()).contains("1500"),
+                "the remote reports the TTL it enforced: " + result.getBody());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void standardFormatIsDefaultAndMirrored() throws InterruptedException {
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        long timeout = 3000;
+        Map<String, String> securityHeaders = new HashMap<>();
+        securityHeaders.put("Authorization", "demo");
+        PostOffice po = PostOffice.trackable("unit.test", "9001", "TEST /remote/event/standard");
+        EventEnvelope event = new EventEnvelope().setTo("hello.world")
+                .setBody("interop").setHeader("hello", "world");
+        Future<EventEnvelope> response = po.asyncRequest(event, timeout, securityHeaders,
+                "http://127.0.0.1:"+port+"/api/event", true);
+        response.onSuccess(bench::add);
+        EventEnvelope result = bench.poll(timeout, TimeUnit.MILLISECONDS);
+        assertNotNull(result);
+        assertEquals(200, result.getStatus());
+        // the service mirrors the requester's format - with the standard default,
+        // the response envelope arrives in the standard wire format
+        assertEquals(EventEnvelope.Format.STANDARD, result.getWireFormat());
+        MultiLevelMap map = new MultiLevelMap((Map<String, Object>) result.getBody());
+        assertEquals("interop", map.getElement("body"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void compactFallbackByHeaderIsMirrored() throws InterruptedException {
+        final BlockingQueue<EventEnvelope> bench = new ArrayBlockingQueue<>(1);
+        long timeout = 3000;
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Authorization", "demo");
+        // the per-call serialization instruction - consumed by the client, not sent
+        headers.put("x-event-format", "compact");
+        PostOffice po = PostOffice.trackable("unit.test", "9002", "TEST /remote/event/compact");
+        EventEnvelope event = new EventEnvelope().setTo("hello.world")
+                .setBody("legacy").setHeader("hello", "world");
+        Future<EventEnvelope> response = po.asyncRequest(event, timeout, headers,
+                "http://127.0.0.1:"+port+"/api/event", true);
+        response.onSuccess(bench::add);
+        EventEnvelope result = bench.poll(timeout, TimeUnit.MILLISECONDS);
+        assertNotNull(result);
+        assertEquals(200, result.getStatus());
+        // the compact request is understood (sniffed) and the reply mirrors it
+        assertEquals(EventEnvelope.Format.COMPACT, result.getWireFormat());
+        MultiLevelMap map = new MultiLevelMap((Map<String, Object>) result.getBody());
+        assertEquals("legacy", map.getElement("body"));
+    }
+
+    @Test
+    void metadataIsNeverTransportedInTheEvent() throws InterruptedException {
+        // The my_* metadata keys are injected into the function's input header COPY at
+        // delivery - they must never exist as envelope headers. The business correlation-id
+        // crosses touch points (and the Event-over-HTTP wire) as an engine-managed tag.
+        final BlockingQueue<Map<String, String>> captured = new ArrayBlockingQueue<>(1);
+        final String captureRoute = "metadata.transport.capture";
+        TypedLambdaFunction<EventEnvelope, Object> capture = (headers, event, instance) -> {
+            Map<String, String> seen = new HashMap<>();
+            seen.put("injected_cid", headers.get("my_correlation_id"));
+            seen.put("injected_route", headers.get("my_route"));
+            seen.put("envelope_cid_header", event.getHeader("my_correlation_id"));
+            seen.put("envelope_event_api_header", event.getHeader("x-event-api"));
+            seen.put("delivered_event_api", headers.get("x-event-api"));
+            // engine metadata (routing target, tags) is not visible to a user function
+            seen.put("visible_tags", String.valueOf(event.getTags()));
+            captured.add(seen);
+            return null;
+        };
+        Platform.getInstance().register(captureRoute, capture, 1);
+        try {
+            String correlationId = "corr-" + Utility.getInstance().getUuid();
+            Map<String, String> callerContext = new HashMap<>();
+            callerContext.put("my_route", "unit.test");
+            callerContext.put("my_trace_id", "trace-" + Utility.getInstance().getUuid());
+            callerContext.put("my_trace_path", "TEST /metadata/transport");
+            callerContext.put("my_correlation_id", correlationId);
+            PostOffice po = PostOffice.trackable(callerContext, 1);
+            // remote hop through the loopback /api/event exercises the wire + relay too
+            Map<String, String> securityHeaders = Map.of("Authorization", "demo");
+            po.asyncRequest(new EventEnvelope().setTo(captureRoute).setBody("ping"), 5000,
+                    securityHeaders, "http://127.0.0.1:" + port + "/api/event", false);
+            Map<String, String> seen = captured.poll(10, TimeUnit.SECONDS);
+            assertNotNull(seen);
+            // injected metadata reaches the function's header copy
+            assertEquals(correlationId, seen.get("injected_cid"));
+            assertEquals(captureRoute, seen.get("injected_route"));
+            // but the envelope itself never carries metadata or engine-internal keys
+            assertNull(seen.get("envelope_cid_header"), "my_correlation_id must not be an envelope header");
+            assertNull(seen.get("delivered_event_api"), "x-event-api must not reach a user function");
+            // the tag channel is engine-managed - not even visible to the function's envelope view
+            // (the injected value above arriving intact across the wire proves the tag carried it)
+            assertEquals("{}", seen.get("visible_tags"));
+        } finally {
+            Platform.getInstance().release(captureRoute);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void eventApiServiceIsAVisibleSpanInTheTrace() throws InterruptedException {
+        // Regression: the "/api/event" edge must connect to the span tree - the
+        // event.api.service span parents onto the remote caller's span (carried by the
+        // inbound trace headers), and the target function parents onto event.api.service.
+        // This is the reference behavior for other language implementations.
+        String traceForwarder = "distributed.trace.forwarder";
+        BlockingQueue<Map<String, Object>> records = new ArrayBlockingQueue<>(20);
+        Platform platform = Platform.getInstance();
+        String traceId = Utility.getInstance().getUuid();
+        String callerFunction = "event.api.span.caller";
+        LambdaFunction collector = (headers, input, instance) -> {
+            Map<String, Object> trace = (Map<String, Object>) input;
+            MultiLevelMap m = new MultiLevelMap(trace);
+            if (traceId.equals(m.getElement("trace.id"))) {
+                records.add(trace);
+            }
+            return null;
+        };
+        LambdaFunction caller = (headers, input, instance) -> {
+            // a traced function making a remote Event-over-HTTP RPC - its own span is
+            // the parent of the event.api.service span on the (loopback) remote side
+            PostOffice po = new PostOffice(headers, instance);
+            Map<String, String> securityHeaders = Map.of("Authorization", "demo");
+            EventEnvelope event = new EventEnvelope().setTo("hello.world").setBody(input);
+            return po.request(event, 8000, securityHeaders,
+                    "http://127.0.0.1:"+port+"/api/event", true).get().getBody();
+        };
+        platform.registerPrivate(traceForwarder, collector, 1);
+        platform.registerPrivate(callerFunction, caller, 1);
+        PostOffice po = new PostOffice("unit.test", traceId, "TEST /event/api/span");
+        po.asyncRequest(new EventEnvelope().setTo(callerFunction).setBody("start"), 8000)
+                .onSuccess(response -> assertEquals(200, response.getStatus()));
+        MultiLevelMap callerRecord = null;
+        MultiLevelMap eventApiRecord = null;
+        MultiLevelMap targetRecord = null;
+        long deadline = System.currentTimeMillis() + 10000;
+        while ((callerRecord == null || eventApiRecord == null || targetRecord == null)
+                && System.currentTimeMillis() < deadline) {
+            Map<String, Object> item = records.poll(2, TimeUnit.SECONDS);
+            if (item != null) {
+                MultiLevelMap m = new MultiLevelMap(item);
+                Object service = m.getElement("trace.service");
+                if (callerFunction.equals(service)) {
+                    callerRecord = m;
+                } else if ("event.api.service".equals(service)) {
+                    eventApiRecord = m;
+                } else if ("hello.world".equals(service)) {
+                    targetRecord = m;
+                }
+            }
+        }
+        platform.release(traceForwarder);
+        platform.release(callerFunction);
+        assertNotNull(callerRecord, "expect a trace record for the calling function");
+        assertNotNull(eventApiRecord, "expect a trace record for event.api.service");
+        assertNotNull(targetRecord, "expect a trace record for the target function");
+        assertEquals(callerRecord.getElement("trace.span_id"),
+                eventApiRecord.getElement("trace.parent_span_id"),
+                "event.api.service must parent onto the remote caller's span");
+        assertEquals(eventApiRecord.getElement("trace.span_id"),
+                targetRecord.getElement("trace.parent_span_id"),
+                "the target function must parent onto the event.api.service span");
     }
 }

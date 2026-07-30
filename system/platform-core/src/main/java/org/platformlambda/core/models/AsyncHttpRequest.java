@@ -332,7 +332,7 @@ public class AsyncHttpRequest {
      * Please use setFileNames(fileNames)
      * <p>
      * this API is or backward compatibility only
-     * @param fileName for multi-part upload
+     * @param fileName for multipart upload
      * @return this
      */
     public AsyncHttpRequest setFileName(String fileName) {
@@ -387,7 +387,10 @@ public class AsyncHttpRequest {
         if (timeout == null) {
             return -1;
         }
-        return Math.max(1, Utility.getInstance().str2int(timeout)) / 1000;
+        // ceiling division with a one-second minimum: the X-TTL header is in
+        // milliseconds and a fractional second must round UP, never down to
+        // zero (1,500 ms is a 2-second budget, not 1)
+        return Math.max(1, (Utility.getInstance().str2int(timeout) + 999) / 1000);
     }
 
     public AsyncHttpRequest setTimeoutSeconds(int timeoutSeconds) {

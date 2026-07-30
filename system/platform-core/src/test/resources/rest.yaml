@@ -47,6 +47,55 @@ rest:
     # optionally, you can turn on Distributed Tracing
     tracing: true
 
+  # Per-endpoint header-name overrides (impedance matching): this endpoint accepts a legacy caller
+  # that sends 'X-Legacy-Trace' and 'X-Legacy-Cid' instead of the global X-Trace-Id / X-Correlation-Id.
+  # A well-formed W3C traceparent still takes precedence over the trace-id header.
+  - service: "header.probe"
+    methods: ['GET']
+    url: "/api/legacy/probe"
+    timeout: 10s
+    tracing: true
+    trace.id.header: "X-Legacy-Trace"
+    correlation.id.header: "X-Legacy-Cid"
+
+  # Legacy conflation config: ONE header name carries both the trace-id and the correlation-id
+  # (e.g. a gateway that only passes X-Correlation-Id). When the shared header is absent, the
+  # endpoint must generate ONE id for both - never two.
+  - service: "header.probe"
+    methods: ['GET']
+    url: "/api/conflated/probe"
+    timeout: 10s
+    tracing: true
+    trace.id.header: "X-Shared-Id"
+    correlation.id.header: "X-Shared-Id"
+
+  # Per-endpoint traceparent header-name override: when the standard 'traceparent' is absent
+  # (it always wins when present), this endpoint falls back to 'X-Endpoint-Trace' - the per-entry
+  # name replaces the global http.traceparent.header (X-Trace-Context in this test suite).
+  - service: "header.probe"
+    methods: ['GET']
+    url: "/api/renamed/traceparent/probe"
+    timeout: 10s
+    tracing: true
+    traceparent.header: "X-Endpoint-Trace"
+
+  # Simulates application A in an application-to-application HTTP call: this traced endpoint's
+  # function calls /api/legacy/probe ("application B") through async.http.request, so tests can
+  # assert that one distributed trace continues across the HTTP hop between the two.
+  - service: "downstream.caller"
+    methods: ['GET']
+    url: "/api/chain/probe"
+    timeout: 15s
+    tracing: true
+
+  # A traced caller whose downstream target is the /api/hello/world echo, so tests can inspect
+  # the raw headers AsyncHttpClient stamped on the outgoing hop (e.g. the custom traceparent name).
+  - service: "echo.chain.caller"
+    methods: ['GET']
+    url: "/api/echo/chain"
+    timeout: 15s
+    tracing: true
+
   - service: "hello.mock"
     methods: ['POST']
     url: "/api/upload/demo"

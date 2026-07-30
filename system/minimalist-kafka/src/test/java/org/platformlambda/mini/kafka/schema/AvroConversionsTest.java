@@ -28,6 +28,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -103,8 +104,9 @@ class AvroConversionsTest {
 
         Object avro = AvroConversions.toAvro(input, schema());
         Map<String, Object> out = (Map<String, Object>) AvroConversions.fromAvro(avro);
-        assertInstanceOf(Map.class, out.get("child"));
-        assertEquals("deep", ((Map<String, Object>) out.get("child")).get("value"));
+        assertNotNull(out);
+        Map<String, Object> child = (Map<String, Object>) assertInstanceOf(Map.class, out.get("child"));
+        assertEquals("deep", child.get("value"));
     }
 
     @Test

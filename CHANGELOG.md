@@ -8,6 +8,903 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## Unreleased
+
+### Added
+
+1. **Workflow suspension for the Active Knowledge Graph (suspend/resume).** A graph run
+   can suspend at a human checkpoint — approval, intervention, inbox notification — and
+   resume later with the same business correlation ID, without re-executing completed
+   steps. A long-running business process becomes a sequence of short runs; nothing stays
+   in memory between them.
+   - New skills **`graph.suspend`** / **`graph.resume`** (supersets of `graph.task`: the
+     `task` property names a pluggable state-store function; envelope assembly and
+     restoration are fully encapsulated — no node data mapping). The node alias
+     **`suspend`** is reserved (the `root`/`end` pattern — traversal jumps to it by
+     name); a skilled node marked with the new reserved property **`suspend=true`**
+     routes there after executing. `graph.resume` records the run condition in
+     **`model.run`** (`resume` | `fresh`) so the graph's own logic decides how a
+     fresh-or-expired request is handled — the engine deliberately does not distinguish
+     absent from expired. `model.run` joins the read-only flow-metadata family
+     (`model.cid`/`instance`/`flow`/`ttl`/`trace`): the flow compiler and the runtime
+     dynamic-target guard reject any data mapping that overwrites it. The suspend node's **`ttl`** is mandatory with no default
+     (duration syntax, e.g. `2d`).
+   - Traversal bookkeeping is persisted and restored, so a `graph.join` after resume
+     still sees branches completed before suspension. Reserved model keys never persist.
+     CompileGraph validates the static contract for manifest graphs (alias⇔skill binding,
+     no suspension on routing skills, the drawn checkpoint edge, a continuation edge on
+     every suspension point, mandatory `ttl` with an overflow-guarded parser, an outgoing
+     connection from the suspend node, a mandatory `end` node, and rejection of
+     data-mapping entries missing `->` — an `input` entry without `->` remains valid
+     skill vocabulary, e.g. the fetcher's dictionary parameter names); the runtime guards
+     remain the enforcement floor for the playground dry-run surface.
+   - New optional extension **`extensions/minigraph-state-redis`**: `v1.redis.persist.model`
+     (SETEX, native expiry) and `v1.redis.retrieve.model` (atomic GETDEL consume,
+     Redis 6.2+) register automatically when the jar is included (the
+     minigraph-playground example app now does); lazy connection, `redis.*` config keys
+     shared with sync-over-async. Any composable function honoring the documented store
+     contract can replace it.
+   - New tutorial **`tutorial-14`** (a purchase workflow with THREE human checkpoints —
+     order, approval, delivery release — as four short runs, shipped with the engine)
+     with end-to-end tests against embedded Redis — including input validation: a
+     later-stage request without a suspended record is rejected with HTTP 404 (a null-safe presence check via
+     `{var}` substitution inside a `text()` constant) — and every stage reply carries the
+     `run` flag. The **Workflow Suspension** guide
+     chapter (incl. the state-store contract), skills-reference entries, `help.md` +
+     `help tutorial 14.md` Playground pages, and Playground node types
+     `Suspend`/`Resume`/`Suspensible` (visual convention — the skill defines behavior).
+   - **Business correlation-id fidelity in graph telemetry and logs**: the graph walkers
+     stamp the engine's business-cid tag from the graph's `model.cid` on every skill
+     invocation (walkers are event interceptors, so PostOffice does not auto-propagate it),
+     so every skill and store function sees the business ID — not internal routing IDs —
+     in `my_correlation_id`; the suspend/resume skills also annotate their trace spans
+     with `cid`. In the same spirit, the application log context's `$cid` token
+     (platform-core) now resolves to the **business** correlation-id only — when the
+     delivered event carries no business context the key is omitted; internal
+     correlation-ids (RPC inbox references, skill-callback composites) are routing
+     metadata and never appear under the `cid` label. Since every edge guarantees a
+     business correlation-id, a missing `cid` on a traced log line signals a propagation
+     defect. The Playground's `instantiate graph` command is the dry-run's edge and now
+     auto-creates `model.cid` (with a reminder) when the initial data mapping does not
+     supply one.
+   - **Declarative response status**: a graph can stage its HTTP status
+     (e.g. `int(404) -> output.status`); `graph.executor` applies it to the graph's reply
+     at completion.
+   - **Span lineage for skill-delegated calls**: `graph.suspend`, `graph.resume`,
+     `graph.task` and `graph.extension` now issue their outbound request on the worker
+     thread, so the called function's span chains onto the skill span instead of floating
+     parentless in the trace (the per-function trace context is thread-keyed and is gone
+     inside a `Mono` callback).
+
+2. **Registration Metadata Contract (annotation-macro consistency arc, P2).** A new
+   reference page — `docs/guides/registration-metadata-contract.md` — fixes the
+   cross-language contract behind `@PreLoad` and its family: one canonical metadata model
+   with fixed semantics (boot-time resolution, optional-service grammar, order-free marker
+   stacking, one conflict policy, extension-point naming rules, the boot sequence and
+   loud-failure discovery), carried by per-language idioms. Conformance is proven by
+   **golden vectors shared verbatim** between engine repositories
+   (`registration-vectors/core.json`, `plugin.json`, `feature.json`) with a conformance
+   test per kind — the same golden-vector method that guards the event envelope wire
+   format. Formalized as ADR-0009.
+
+### Changed
+
+1. **CompileGraph is now the deployment gate for graph models (CompileFlows parity).**
+   A deployed graph model is executable at `POST /api/graph/{graph-id}` only when it is
+   listed in the graph manifest (`graph.model.automation`, e.g. `classpath:/graphs.yaml`)
+   AND passes the CompileGraph quality gate at startup. A graph that fails the gate, or
+   is not listed, answers **HTTP-404** as if the model does not exist — the lazy,
+   per-request loading of deployed models is removed, so an unvalidated JSON file in
+   `location.graph.deployed` can no longer be executed. This mirrors CompileFlows, where
+   an invalid flow never becomes executable. The playground dry-run workspace
+   (`location.graph.temp`) is a separate surface and is unaffected. Completing the
+   CompileFlows symmetry, the manifest now carries the location of its own models:
+   the optional **`location`** entry in `graphs.yaml` (default `classpath:/graph`)
+   replaces the `location.graph.deployed` application property, exactly like the
+   `location` entry in `flows.yaml` — the default preserves existing deployed-folder
+   layouts, and a leftover `location.graph.deployed` property logs an obsolete-key
+   warning at startup.
+   With the gate mandatory, `GraphExecutor` no longer re-validates gate-guaranteed
+   rules per request (root/end existence, the suspend-node contract) — a mild
+   per-request gain on top of the compiled-registry reuse; data-driven runtime guards
+   (store-record contents, dynamic jump targets, loop detection) remain. The two
+   lanes are now explicit: production = models → CompileGraph → deployed graphs →
+   GraphExecutor; dry-run = drafts in the temp workspace → UI CLI validation at node
+   create/update → GraphTraveler with full runtime validation. The gate's whole-graph
+   rules are modularized (`GraphModelValidator`) and reused by the playground's `run`
+   command as a pre-run quality check: draft authoring still allows partial models,
+   but the moment the author asks to run, the suspend/resume contract must hold —
+   a violation reports `Unable to run - <reason>` before traversal starts.
+   **Migration:** applications that relied on lazy loading must set
+   `graph.model.automation` and list their deployed graph IDs in the manifest — the
+   shipped examples already do; set the manifest's `location` only if your deployed
+   folder is not `classpath:/graph`.
+
+2. **Actuator worker instances: rule-of-thumb default + operations knob.** The actuator
+   family (`actuator.services` and its aliases serving `/info`, `/info/routes`,
+   `/info/lib`, `/env`, `/health`, `/livenessprobe`) now defaults to **5** worker
+   instances (was 30) and is tunable at deployment time via the new
+   `worker.instances.actuator.services` parameter — one knob for the whole family,
+   following the same `envInstances` convention as `no.op` and the Event Script
+   built-ins. Declared instance counts are rules of thumb; the knob is what lets an
+   operations team tune concurrency in QA and Perf environments before promoting to
+   Production. The lambda-example `event.api.auth` demo likewise moves to 30 instances
+   (a real deployment verifies bearer tokens against an OAuth 2.0 security authority —
+   an I/O-bound call) with `worker.instances.event.api.auth`, modeling the same
+   practice.
+
+### Fixed
+
+1. **Registration conflict policy documented truthfully (annotation-macro consistency
+   round, in lock-step with the Rust engine).** `Platform.register` / `registerPrivate`
+   javadoc claimed an `IllegalArgumentException` on duplicated registration; the actual
+   (and long-standing) behavior is a warn-and-reload — the existing function is released
+   and the new one takes its place. The javadoc now states the reload semantics. The
+   minigraph `PlaygroundLoader` also gains the same duplicate-name warning that
+   `SimplePluginLoader` already emits, so every registry reports duplicates consistently:
+   WARN + last-wins.
+
+2. **`ManagedCache` eviction behavior documented truthfully.** Under `maxItems` capacity
+   pressure, eviction is approximate and non-deterministic (Caffeine W-TinyLFU admission
+   with randomized anti-HashDoS jitter) — callers must not rely on which entry survives.
+   Entry expiry remains exact. The javadoc now states this, and notes the deliberate
+   cross-engine asymmetry: the Rust port's `ManagedCache` uses strict, deterministic LRU
+   (moka). No behavior change; no in-repo consumer runs near its capacity bound.
+
+3. **`worker.instances.<route>` documented truthfully.** The configuration reference
+   claimed the pattern overrides the instance count of *any* registered route; it
+   actually applies only to functions whose `@PreLoad` declares the key via
+   `envInstances` (overriding an arbitrary function's count is `yaml.preload.override`'s
+   job). The page now states the real mechanism and adds the previously undocumented
+   `worker.instances.http.flow.adapter` key.
+
+---
+## Version 4.10.6, 7/24/2026
+
+Code-quality patch release: resolves all 5 SonarQube findings reported by an enterprise
+quality-gate scan of v4.10.4 (2 MEDIUM, 3 HIGH). Every change is behavior-preserving; no
+functional changes.
+
+### Changed
+
+1. **Prose comments reworded so they no longer pattern-match as commented-out code (#231).**
+   `HttpRouter.java` and `KafkaFlowConsumer.java` each carried a comment ending in a stray
+   trailing semicolon — a copy-edit leftover that Sonar's heuristic (java:S125) mistakes
+   for a disabled line of code. Both reworded as plain sentences; no code changed.
+2. **Cognitive complexity reduced by extracting focused helpers (#231).**
+   `InboxBase.recordTrace` (17→15, split into `getTraceMetrics` + `setTraceStatus` with an
+   early-return guard clause), `AsyncHttpResponse.handleEvent` (17→15, guard-clause early
+   returns replacing nested `if` blocks, plus an extracted `setBusinessCorrelationIdHeader`),
+   and `AsyncHttpClient.updateHttpHeaders` (16→15, split into five single-purpose helpers:
+   `setContentLengthHeader`, `applyRequestAndSessionHeaders`, `applyTraceHeaders`,
+   `applyBusinessCorrelationId`, `setCookies`). Regression-verified: full reactor build
+   green, plus a live Java-to-Java Event-over-HTTP interop drive (both the declarative and
+   programmatic calling patterns) confirming distributed-trace span propagation and
+   business correlation-id echo are unchanged — zero duplicate spans, zero dangling
+   `parent_span_id`s across 17 span records.
+
+---
+## Version 4.10.5, 7/24/2026
+
+Security patch in lock-step with the Rust engine's v4.10.5.
+
+### Security
+
+1. **Playground webapp migrated to react-router 8.3.0.** Dependabot flagged the transitive
+   `react-router` 7.18.1 (RSC Mode CSRF Bypass, a follow-up to CVE-2026-22030; affected
+   `>= 7.12.0, < 8.3.0`). `react-router-dom` was retired by upstream at 7.18.1 — it pins
+   the vulnerable version exactly — so the remediation is React Router's v8 package
+   consolidation: the webapp now depends on `react-router` directly, with the import
+   specifier updated in four source files (the named exports are the stable declarative
+   core, unchanged). Validation: `npm audit` reports 0 vulnerabilities; all lockfile
+   entries resolve to registry.npmjs.org with integrity hashes; all 124 webapp tests pass;
+   the production bundle was rebuilt and redeployed.
+
+---
+## Version 4.10.4, 7/24/2026
+
+Patch release in lock-step with the Rust engine's v4.10.4. Two themes, both validated by a
+live cross-language interop drive whose four-combination echo matrix ended in an exact
+replica (all eight runs identical after normalizing volatile fields — see
+`docs/test-reports/event-over-http-interop.md`):
+
+- **Configurable traceparent carrier (field request), standards-first.** The optional
+  `traceparent.header` family bridges legacy intermediaries that strip the standard W3C
+  header; the standard `traceparent` remains the project's position, wins inbound, and
+  needs no configuration.
+- **Interop header hygiene.** The delivered envelope view is scrubbed of engine metadata on
+  both engines, the demos transport business headers only, and the engines' wire and
+  flow-input header surfaces are now byte-for-byte aligned.
+
+### Fixed
+
+1. **The delivered envelope view is scrubbed of engine metadata (interop hygiene round).**
+   The pre-release `ce_traceparent` interop drive's four-combination matrix (see
+   `docs/test-reports/event-over-http-interop.md`) found that a peer-transported or
+   edge-merged `my_*` / `x-event-api` header could surface in a function's input
+   **envelope** header view (the injected input copy was already clean). The worker now
+   scrubs the five engine keys from the delivered envelope for non-interceptor functions —
+   whatever a peer transported can never masquerade as application data — while the legacy
+   `my_correlation_id` compat carrier remains honored into the injected view before the
+   scrub, and event interceptors keep raw transport fidelity. Two regressions added
+   (entry-side twins of the exit sanitization).
+2. **The programmatic Event-over-HTTP demo no longer copies its injected metadata onto the
+   outgoing event.** `EventOverHttpRpc` forwards business headers only — the injected
+   `my_*` view describes the local function's own context and is never transported.
+
+### Added
+
+1. **Configurable traceparent header name (field request).** A new header-name family completes
+   the observability impedance-matching surface: `http.traceparent.header`,
+   `kafka.traceparent.header` and `secondary.kafka.traceparent.header` (secondary falls back to
+   primary, then to the standard `traceparent`), plus per-entry overrides — `traceparent.header`
+   in a rest.yaml endpoint and in a kafka-flow-adapter.yaml consumer binding. An escape hatch for
+   an intermediary (e.g. an API-gateway header allow-list) that strips the standard W3C header:
+   outbound calls (async HTTP client, Event-over-HTTP, `simple.kafka.notification` and its
+   secondary twin) stamp the same W3C value under **both** names, and inbound resolution (REST
+   automation, Kafka Flow Adapter) honors the **standard `traceparent` first** — the custom
+   name is read only when the standard header is absent, because a well-formed standard
+   traceparent means the caller already speaks W3C/OTel and a residual proprietary header is
+   safely ignored. Unlike the trace-id
+   conflation workaround, the full W3C context (trace-id, parent span-id, flags) crosses the
+   intermediary, so cross-application **span parenting** survives. Default behavior unchanged
+   (`traceparent`). **The standard W3C/OpenTelemetry `traceparent` remains the project's
+   position** — the optional family is for backward compatibility with legacy systems only,
+   and departure from the standard is discouraged (a renamed carrier is invisible to
+   OTel-compliant tooling); treat a custom name as a temporary bridge and plan the migration
+   back to the standard header.
+
+---
+## Version 4.10.3, 7/23/2026
+
+Patch release for field deployment, in lock-step with the Rust engine's v4.10.3. No engine
+behavior changes: demo hygiene and refreshed web assets on top of v4.10.2, consolidating
+the 4.10 line - the language-neutral wire format, telemetry presentation parity, the
+boundary-demarcation metadata contract, and the collection plugins - for the field's
+quality-gate pipeline.
+
+### Changed
+
+1. **The demo echo displays the clean envelope-header view (#225).** The lambda-example
+   echo consumes the EventEnvelope and echoes `input.getHeaders()` - a live proof that the
+   engine never transports its read-only `my_*` metadata in the event - while the injected
+   view remains available for PostOffice bootstrapping. The `sleep_ms` option is repaired
+   with a regression test asserting the delay, and the guide's sample responses reflect
+   the clean-echo shape.
+2. **Playground webapp dependencies refreshed from npm (#224).** Fresh registry resolution
+   within the existing semver ranges (69 minor/patch updates; react 19.2.8, vite 8.1.5,
+   vitest 4.1.10); npm audit clean, all 280 lockfile entries resolve to registry.npmjs.org
+   with integrity hashes; bundle rebuilt and redeployed.
+
+---
+## Version 4.10.2, 7/23/2026
+
+Patch release in lock-step with the Rust engine's v4.10.2: the metadata contract and the
+RPC reply path. A composable function's three inputs are headers, body and instance - the
+headers are a copy of the envelope headers with read-only metadata injected by the worker
+at entry and sanitized at exit; metadata is never transported in the event itself. The
+`inbox.*` route namespace is confirmed to belong to applications (the Rust port aligned to
+the single reserved `temporary.inbox` route). Cross-language interop re-verified in all
+four direction combinations with the trace signature at empty diff - see the updated
+[Interop Test Report](https://accenture.github.io/mercury-composable/test-reports/event-over-http-interop/).
+Also ships three community-contributed collection plugins for Event Script.
+
+### Added
+
+1. **Three collection plugins for Event Script data mapping (#220).** `isEmpty`
+   (Collection, Map, String or array), `getFirst` and `getLast` (non-empty List) join the
+   built-in simple plugins as the new `collection` category - documented in the syntax
+   guide's Built-in Plugins section.
+2. **The HTTP response echoes the business correlation-id (#221).** REST automation returns the
+   request's correlation-id (inbound or edge-generated) on the response under the
+   configured header name (default `X-Correlation-Id`), so an edge caller can correlate
+   without parsing the body. A response header of the same name set by the function takes
+   precedence.
+
+### Fixed
+
+1. **Protected metadata is never transported in the event (#221).** The business correlation-id
+   now rides an engine-managed envelope tag instead of a `my_correlation_id` envelope
+   header, and the worker injects the `my_*` read-only keys into the function's input
+   header copy at delivery - so reserved metadata can no longer leak across the
+   Event-over-HTTP wire, into relayed events, or through flow header mappings. The
+   engine-internal `x-event-api` relay guard is likewise removed from the function's view.
+   A callee still honors the legacy header from a pre-4.10.2 peer (injected, then
+   stripped), but no longer sends it - business-cid continuity in mixed fleets requires
+   both sides on this version, the same upgrade-together posture as the wire format.
+
+---
+## Version 4.10.1, 7/23/2026
+
+Patch release in lock-step with the Rust engine's v4.10.1: telemetry presentation parity.
+Polyglot installations aggregate both engines' telemetry and logs in front of the same
+DevSecOps team, so the two engines' output must be structurally identical. The Java engine
+is the reference implementation - this release makes its trace complete (the "/api/event"
+edge is now a visible span), and the two engines' logs are verified as exact structural
+replicas in all four direction combinations - see the updated
+[Interop Test Report](https://accenture.github.io/mercury-composable/test-reports/event-over-http-interop/),
+which now also serves as the playbook for future language ports.
+
+### Added
+
+1. **Event-over-HTTP authentication demo (#217).** The lambda-example overrides the default
+   `/api/event` endpoint with a demo authentication service (`event.api.auth`) that
+   validates the caller's `authorization` header against a shared secret resolved from the
+   environment (`demo.peer.token=${DEMO_PEER_TOKEN:demo}` on both peers - no hard-coded
+   credential). The composable-example presents the token declaratively (a `headers` block
+   in `event-over-http.yaml`) and programmatically (the request API's security headers),
+   and session info injected by the auth service rides to the target function.
+
+### Changed
+
+1. **The declarative demo endpoint is renamed for symmetry with its programmatic twin (#217):**
+   `/api/event/http/demo` → `/api/event/http/declarative` and flow id
+   `event-over-http-demo` → `event-over-http-declarative` in the composable-example.
+
+### Fixed
+
+1. **The "/api/event" edge is now a visible span in the trace (#217).** `event.api.service` was
+   zero-tracing, so the target function of a remote call parented onto a span from another
+   application with nothing in between, and the HTTP response leg floated with no parent.
+   The service is now traced: its span parents onto the remote caller's span, the target
+   function parents onto it, and the response leg chains onto it as well. This is the
+   reference behavior for other language implementations.
+
+---
+## Version 4.10.0, 7/22/2026
+
+Feature release: cross-language Event-over-HTTP interoperability with the official
+[Rust implementation](https://github.com/Accenture/mercury) — language-neutral wire format,
+a ready-to-run demo pair covering both calling patterns, application log context on by
+default, and RPC span-lineage telemetry. Validated by live bidirectional Java ⇄ Rust
+interop drives — see the
+[Interop Test Report](https://accenture.github.io/mercury-composable/test-reports/event-over-http-interop/).
+
+### Added
+
+1. **Language-neutral event envelope wire format for Event over HTTP interoperability
+   (#212, #213).**
+   The serialized envelope is now, by default, a MsgPack map with descriptive string keys
+   (`id`, `to`, `headers`, `body`, …) that any MsgPack-capable language can encode and
+   decode — documented as a self-contained spec in the new
+   [Event Envelope Wire Format](https://accenture.github.io/mercury-composable/guides/event-envelope-wire-format/)
+   reference, with golden conformance vectors shared with the official Rust implementation.
+   New API: `EventEnvelope.Format {COMPACT, STANDARD}`, `toMap(Format)`, `toBytes(Format)`;
+   the no-argument forms preserve their existing behavior (`toMap()` = standard map,
+   `toBytes()` = classic compact wire), so in-process callers and the Kafka service mesh
+   are untouched. Inbound decoding detects the format automatically (the two key
+   namespaces are disjoint) and the `/api/event` service mirrors the requester's format in
+   its response. Outbound selection: `event.over.http.format` (default `standard`;
+   `compact` is the fallback for peers on older versions) plus a per-call
+   `x-event-format` header.
+2. **Application log context is now on by default (#215).** platform-core ships a built-in
+   `default-log-context.yaml` so the structured JSON appenders (`log.format=json` or
+   `compact`) stamp the standard trace context (`cid`, `traceId`, `tracePath`, `spanId`,
+   `parentSpanId`, `service`, `timestamp`) into every log line a traced function emits —
+   no setup required. An application can replace the template with its own
+   `app-log-context.yaml`, or opt out with the new `app.log.context=false` key in
+   application.properties. Applications already providing an `app-log-context.yaml` are
+   unaffected. Plain-text logging (`log.format=text`, the default) is unaffected.
+3. **RPC telemetry now records span lineage (#215).** The `round_trip` record a caller emits for
+   each RPC response carries `span_id` (the callee's span) and `parent_span_id` (the
+   caller's span), so trace visualizers can chain RPC round-trips into the span tree —
+   including across Event-over-HTTP hops. The span id is adopted only from a direct
+   responder; a relayed reply (e.g. an event flow answering on behalf of the flow adapter)
+   keeps `parent_span_id` without claiming another function's span.
+4. **Ready-to-run Event-over-HTTP demo in the examples — both patterns (#215).** The
+   lambda-example exposes a public `hello.world` echo with a `hello.declarative` alias.
+   The composable-example's `POST /api/event/http/demo` endpoint runs a flow whose task is
+   that foreign alias route — resolved through `event-over-http.yaml` with zero
+   orchestration code — while its `POST /api/event/http/programmatic` twin reaches the same
+   peer function by passing the Event API endpoint URL directly to the PostOffice request
+   API. The same demo doubles as a cross-language interop demo against the official Rust
+   implementation's counterpart examples — see the step-by-step walk-through in the
+   [Event over HTTP](https://accenture.github.io/mercury-composable/guides/event-over-http/)
+   guide.
+
+### Removed
+
+1. **Retired the rest-spring-example Event-over-HTTP demo (#215).** The `HelloPoJoEventOverHttp` /
+   `HelloPoJoEventOverHttpByConfig` controllers, their `event-over-http.yaml`, and the
+   `lambda.example.port` / `yaml.event.over.http` keys are removed from both
+   rest-spring-3-example and rest-spring-4-example, and the `hello.pojo2` alias is removed
+   from the lambda-example. The composable-example's programmatic + declarative demo
+   endpoints (see Added) supersede them as the canonical Event-over-HTTP walk-through; the
+   rest-spring examples stay focused on Spring Boot integration.
+
+### Fixed
+
+1. **HTTP client read timeout no longer truncates a sub-second TTL to 1 second (#214).**
+   `AsyncHttpRequest.getTimeoutSeconds()` now rounds the TTL up and the underlying HTTP
+   client adds a one-second grace period, so a remote Event-over-HTTP call with a TTL
+   that is not a whole number of seconds gets its in-band 408 from the remote side
+   instead of a transport-level read timeout.
+2. **Logger recursion warning on startup eliminated (#215).** The log-context configuration is
+   initialized before log4j2 reconfigures to the JSON/compact appenders, so its first
+   log lines no longer re-enter an appender that is still initializing
+   ("Recursive call to appender").
+
+---
+## Version 4.9.2, 7/21/2026
+
+Code-quality patch release: resolves all 19 SonarQube findings reported by an enterprise
+quality-gate scan of v4.9.1 (8 HIGH, 11 MEDIUM), all in the 4.9.0/4.9.1 minigraph
+companion/discovery code. Every change is behavior-preserving; no functional changes.
+
+### Changed
+
+1. **Cognitive complexity reduced by extracting focused helpers (#210).**
+   `PostCompanionCommandSync.handleEvent` (20→~5), `GraphCommandService.handleCommand`
+   (17→~8), `describeDeployedGraph` (19→~6), and `collectPathTokens` (25→small, keeping the
+   4.9.1 unbalanced-bracket behavior exactly). The new structure leaves headroom for future
+   changes in methods that sat at the Sonar threshold.
+2. **Duplicated string literals replaced with constants (#210)** — `"command"`, `"Total "`,
+   `"nodes"`, `"properties"`.
+3. **`deployedModel` returns an empty map instead of null (#210)** — internal contract
+   change; both callers updated.
+4. **Test-quality cleanup (#210)** — one invocation per `assertThrows` lambda; the
+   27-assertion companion sync test split at its natural seam; a multi-line command
+   converted to a text block; prose comments that pattern-matched as commented-out code
+   reworded. Regression-verified: HTTP-404 from a downstream service handled correctly by
+   the API fetcher in both dry-run (graph traveler) and deployed execution (graph executor).
+
+---
+## Version 4.9.1, 7/20/2026
+
+Patch release: a cosmetic fix to the `describe graph` contract view, and a documentation-site
+overhaul — the Material for MkDocs theme with mermaid diagrams replacing all scanned images, and
+the wide reference tables restructured into readable, deep-linkable per-entry sections.
+
+### Fixed
+
+1. **`describe graph {graph-id}` printed a stray trailing `]` on the derived output surface (#206).**
+   The contract view scanned each node's properties via Java's `Map.toString()` form, so a dotted-path
+   token ending a mapping list absorbed the list's closing bracket (`output.body]`). Properties are
+   now serialized to JSON before scanning — restoring byte-identical contract output with the Rust
+   engine — and the tokenizer additionally trims an unbalanced trailing `]`. Test assertions
+   tightened to exact-line matches so a trailing-character regression fails the suite.
+   Found by the Rust-port session while cross-verifying the two engines.
+
+### Changed
+
+2. **Documentation site: Material for MkDocs theme (#207).** Switched from the readthedocs theme —
+   light/dark palettes, navigation tabs, native mermaid rendering. All 10 scanned PNG diagrams are
+   now mermaid flowcharts living in the markdown (editable, theme-aware, reviewable as text), plus a
+   new sequence diagram for the sync-over-async request/response pattern.
+
+3. **Readable reference pages (#207).** Wide tables whose description columns forced horizontal
+   scrolling became per-entry sections (heading + Type/Default mini-table + full-width prose,
+   matching the Rust port's format): configuration-reference (127 keys), flow-schema-reference
+   (24 fields), annotations-reference (18 parameters), event-envelope-reference (58 methods).
+   Long-cell listings (the built-in plugin catalog, three command-reference tables) became
+   definition lists.
+
+4. **Documentation content fixes (#207).** The Distributed Architecture overview now presents
+   Event over HTTP, Minimalist Kafka (recommended for fully asynchronous event-driven
+   architecture), and the service mesh with its two-problem scope (sync-over-Kafka RPC + service
+   discovery). References to the out-of-sync Node.js port removed (a fresh re-port is planned);
+   Rust cross-links kept. The unit-test example now matches the shipped `lambda-example`
+   (`AutoStart` is idempotent — no sequence guard needed). rest.yaml `methods` corrected to
+   "one or more HTTP methods".
+
+---
+## Version 4.9.0, 7/20/2026
+
+Feature release: the MiniGraph Playground becomes fully operable by AI agents — a synchronous
+companion endpoint with a truthful contract, self-service discovery of deployed graphs and flows,
+and battle-tested AI-agent documentation (hardened by 25 fresh-agent exercises across this engine
+and the Rust port; the last thirteen passed with zero documentation lookups). Also delivers two
+latent join-barrier fixes, numeric promotion for the simple-plugin arithmetic family, and
+cross-links to the official Rust implementation at github.com/Accenture/mercury.
+
+### Added
+
+1. **Synchronous AI-companion endpoint (ADR-0008) (#189, example wiring #190).** `POST /api/companion/{id}/sync` returns
+   the command outcome in-band as `{ok, output, error, result}` — the existing fire-and-forget
+   `/api/companion/{id}` leaves an AI caller blind (outcome and errors were WebSocket-only). The same
+   output is also teed to the session's WebSocket `.out`, so a watching human — and any
+   `session subscribe`d session — sees it live (real-time human+AI collaboration). Additive; the
+   existing endpoint and the WebSocket console are unchanged.
+
+2. **Discovery commands: `list graphs` and `list flows` (#199).** Read-only enumeration of the
+   deployable graph models (compiled registry ∪ deployed folder, each with its root node's
+   `purpose` — living documentation) and the Event Script flows — so valid `extension=` /
+   `extension=flow://` delegation targets are discoverable without an out-of-band brief, on the
+   console and both companion endpoints. The graph compiler now enforces a non-empty root
+   `purpose` so every listed model is self-describing.
+
+3. **`describe graph {graph-id}` — a deployed model's contract view (#200).** Purpose,
+   node/connection counts, and the `input.*`/`output.*` data surface derived from the model's own
+   mappings — completing self-service delegation: list → contract → delegate, all read-only.
+   Tutorial-3/5 fixture purposes differentiated so purpose-based discovery can tell them apart.
+
+4. **Numeric promotion for simple-plugin arithmetic + new `f:round` (#196).** `add`/`subtract`/
+   `multiply`/`div`/`mod`/`increment`/`decrement` and `gt`/`lt` now accept mixed numbers: whole
+   numbers promote to long (exact 64-bit arithmetic, including integer division), any decimal
+   argument promotes the whole computation to double — strictly widening, no previously-working
+   call changes. New `f:round(number[, places])` rounds half-up on the decimal representation
+   (`1.005` → `1.01` at 2 places; binary error never leaks into the decision).
+
+5. **AI-agent documentation hardening (#187, #203).** The `graph.math`/`graph.js` statement
+   grammar documented (#187); then the full grammar hardening back-ported from the Rust R&D
+   effort (#203): Provider & Dictionary authoring, the constants closed set + `f:`/`$.` source
+   forms, `help {topic}`, fork/join state-safety, iterative fetching with the guaranteed ordered
+   aggregation, the required Island knowledge layer, composite keys + array append, the
+   `graph.extension` delegation contract, failure routing with the canonical bounded-retry
+   pattern, the sync-envelope contract, and more — across `command-reference.md`,
+   `minigraph-commands.json`, `skills-reference.md`, `ai-agent-guide.md`, `llms.txt` (new
+   AI-agent map sections), `event-script/syntax.md`, and `help graph-api-fetcher.md`.
+
+6. **Cross-links to the official Rust implementation (#204).** README, docs home, and `llms.txt`
+   now point at github.com/Accenture/mercury (same three layers, same flow YAML; flow files port
+   unchanged) — the two projects' `llms.txt` maps reference each other.
+
+### Fixed
+
+1. **`/api/companion/{id}/sync` now returns the whole `run` outcome (ADR-0008, #191/#193).** `run` is
+   asynchronous — the command handler replies before the traveler streams its `Walk to…` / `Executed…`
+   / `output` / terminal lines — so the FIFO sentinel raced (and usually beat) that tail and truncated
+   the response to just `Walk to root` / `Walk to end`. A traversal is now drained on the traveler's
+   **terminal line** (`Graph traversal completed in N ms` | `Graph traversal aborted`), always emitted
+   last. To make that signal reliable, every `run` now ends with one terminal line: the early-failure
+   paths (no instance yet, missing root/end node) emit their reason *then* the canonical
+   `Graph traversal aborted`, so `run` before `instantiate` returns promptly (`ok:false`) instead of
+   waiting out the timeout. Synchronous commands keep the sentinel drain. This keeps the `/sync` REST
+   contract byte-identical with the Rust port — the companion surface is language-neutral.
+
+2. **Companion endpoints limit `session` to the read-only status query (#194).** Executed through
+   the sync endpoint, `session subscribe` durably registered the ephemeral per-request capture
+   route as a subscriber (a dangling ghost). A companion is an *assistant to* a session, not a
+   WebSocket session of its own — the topology subcommands (`subscribe`/`unsubscribe`/`reset`)
+   are now rejected before dispatch on both companion endpoints, with the refusal returned
+   in-band and echoed to the live console.
+
+3. **`/sync` `ok` false-negative on import's benign fallback (#195).** `import graph from
+   {deployed}` succeeds via the classpath fallback but reported `ok:false` — the per-line
+   heuristic tripped on the benign "Graph model not found in /tmp/…" line. Classification is now
+   whole-output-aware: the not-found line is forgiven only when the same output carries the
+   fallback's success marker; a genuine miss stays `ok:false`.
+
+4. **Join barrier: only valid completions count (#197, #198).** The barrier's completion mark
+   meant "ran", not "completed" — it was stamped even when a branch failed into its `exception=`
+   route, and `RESET` left the stale mark behind, so a fork whose failing branch retries could
+   fire the join prematurely and silently lose that branch's data. The mark is now success-only
+   and `RESET` clears it (#197); a downstream join judges an upstream join by its recorded
+   outcome, not its run mark, so chained joins can't fire off a sunk barrier (#198). Traveler
+   (dry-run) and executor (deployed) behave identically.
+
+5. **`/sync` contract gaps (#201).** The 1-second identical-command dedup guard (a WebSocket
+   double-submit protection) silently swallowed a repeated command from the sync endpoint —
+   `ok:true` with empty output; `/sync` dispatches are now marked direct and bypass the guard
+   (the WS path keeps it). A malformed command answered with a `Syntax: …` usage hint now
+   classifies `ok:false` with the hint as the in-band error.
+
+6. **`flow-schema-reference.md` documented `error.status`; the engine key is `error.code`
+   (#203).** Doc corrected in all mapping examples (found while source-verifying the Rust
+   port's documentation site).
+
+### Changed
+
+1. **The Playground welcome message no longer prints the companion endpoint (#202).** With the
+   synchronous endpoint in place the line advertised the legacy fire-and-forget form; the
+   session id — the one thing a human shares with an AI agent — remains.
+
+---
+## Version 4.8.6, 7/14/2026
+
+Maintenance release: the flow state-machine's read-only contract is now fully enforced, plus
+code-quality touch-up from the field pipeline scan.
+
+### Changed
+
+1. **BREAKING for misconfigured flows: reserved state-machine keys are fully enforced (#184).**
+   The flow-instance metadata (`model.cid`, `model.instance`, `model.flow`, `model.ttl`,
+   `model.trace`) and the `model.none` null constant are READ only. `model.trace` and
+   `model.none` now join the compile-time enforcement that already covered the other metadata
+   keys, and a **dynamic** mapping target (`x -> model.{model.pointer}`) whose pointer resolves
+   to a reserved key at runtime is now rejected as well - it aborts the task and routes the
+   error to the flow's exception handler.
+
+   **What the field will see:** an Event Script flow that overwrites a reserved key (e.g.
+   `... -> model.ttl`) logs an ERROR at application startup -
+   `Skip invalid task (input|output) <task> in <flow>.yml that overwrites the reserved
+   state-machine key '<key>'` - and the offending task is dropped, so the flow fails when
+   executed. **Remedy:** map the value to a non-reserved model key instead (e.g.
+   `model.my_ttl`). To READ metadata, use it as a mapping source (`model.ttl -> ttl`) - that
+   remains fully supported in both input and output mappings.
+
+2. **HttpRouter ingress refactored for clarity (#183)** - behavior-preserving: the trace-context
+   resolution (including the 4.8.5 conflated-header one-id rule) and the auth-service
+   reachability check are now cohesive helpers, guarded by the existing regression tests.
+
+### Fixed
+
+1. **Documentation corrections for the flow state machine (#184).** The Flow Configuration
+   Schema reference wrongly described `model.flow` (the flow configuration ID) and
+   `model.instance` (the flow instance ID) as aliases, omitted `model.cid`/`model.ttl`, and
+   contained an example that itself wrote to `model.trace`. The Event Script syntax guide now
+   states the metadata's READ-only contract explicitly.
+2. **Test-only quality items (#183):** the last `*Exception`-named non-Throwable test fixture
+   renamed (java:S2166) and a generous span-collection deadline in the OpenTelemetry flow-trace
+   test (same busy-CI-executor convention as the 4.8.5 boot deadlines).
+
+---
+## Version 4.8.5, 7/14/2026
+
+Maintenance release: trace/correlation impedance-matching edge case and CI build reliability.
+
+### Fixed
+
+1. **Conflated trace/correlation header names now yield ONE generated id (#179).** When
+   `trace.id.header` and `correlation.id.header` resolve to the same name (the legacy conflation
+   config, e.g. both `X-Correlation-Id` for an API gateway that only passes that header) and the
+   caller supplies no header, both ingress paths - REST automation and the Minimalist Kafka flow
+   adapter - previously generated two unrelated ids. They now yield a single id: the trace id is
+   authoritative (a caller `traceparent` still wins), and the correlation id adopts it. A supplied
+   shared header feeds both ids unchanged, and distinct header names keep their independent
+   semantics. Validated live across a two-app HTTP hop: one trace id end-to-end with correct
+   spanId/parentSpanId chains; W3C-shaped (32-hex) ids additionally stamp `traceparent` outbound,
+   which enables cross-application span parenting.
+
+2. **CI build reliability on busy or differently-ordered executors (#178, #180, #181).**
+   App-boot readiness polls in tests now use generous deadlines (90s boot / 60s health warm-up)
+   sized for the slowest pipeline executor (#178). The twin-kafka bridge test is independent of
+   test-class execution order (#180): the embedded Schema Registry URL is injected as a System
+   property under the exact config key (honored live on every read) instead of a `${ENV_VAR}`
+   reference that `AppConfigReader` freezes at singleton initialization, and the module pins
+   surefire to alphabetical run order so every build environment exercises the same class order -
+   fixes a field pipeline failure that GitHub CI's filesystem-dependent ordering never hit.
+   Test configurations no longer read machine-level environment variables (#181):
+   `REDIS_PASSWORD` and `OTEL_*` references were replaced with plain values so instrumented build
+   agents cannot leak credentials or exporter endpoints into hermetic tests; the embedded
+   PostgreSQL `PG_USER`/`PG_PASSWORD` references are documented as deliberate (surefire-pinned,
+   leak-immune).
+
+---
+## Version 4.8.4, 7/13/2026
+
+Maintenance release: completes the Kafka health-check story for dual-cluster applications.
+
+### Added
+
+1. **Secondary Kafka health check (`secondary.kafka.health`).** The twin of minimalist-kafka's
+   `kafka.health`, probing the SECONDARY cluster through the secondary consumer template with
+   identical semantics - a single no-ACL Metadata request, a start-up grace period with a
+   placeholder healthy status, and HTTP 503 when unreachable. A dual-cluster bridge is only
+   healthy when both clusters are reachable:
+   ```properties
+   mandatory.health.dependencies=kafka.health, secondary.kafka.health
+   ```
+   The `/health` dependency list distinguishes the clusters by service name (`kafka` vs
+   `secondary.kafka`), each reporting its own `bootstrap.servers`. Tunables follow the twin-kafka
+   fallback convention: `secondary.kafka.health.timeout` / `secondary.kafka.health.startup.grace`
+   fall back to the `kafka.health.*` globals, then to the built-in defaults (5s / 30s).
+
+### Changed
+
+1. **Both Kafka health checks now run with 5 worker instances** (previously 1). The `/health`
+   endpoint is polled concurrently in the field - operations tooling plus the container platform's
+   liveness/readiness probes - so info and placeholder responses now run in parallel; the
+   non-thread-safe KafkaConsumer stays correct because every cluster probe serializes on the
+   function's ReentrantLock. `KafkaConsumer.close(Duration)` (deprecated since Kafka 4.1) replaced
+   with the `CloseOptions` API.
+2. **The "Kafka Flow Adapter" guide is renamed to "Minimalist Kafka"** for module/guide naming
+   consistency with twin-kafka - the page documents the whole library (inbound flow adapter,
+   outbound notification, Schema Registry integration, and the health checks). All cross-references
+   updated; "Kafka Flow Adapter" remains the name of the inbound component, and the
+   `kafka-flow-adapter.yaml` config file is unchanged.
+
+---
+## Version 4.8.3, 7/13/2026
+
+Security patch: remediates the three transitive OSS vulnerabilities the field security gate
+flagged against v4.8.2, and hardens distributed-tracing regression coverage.
+
+### Security
+
+1. **Apache HttpComponents `httpcore5`/`httpcore5-h2` 5.4.2 → 5.4.3** (HIGH, CWE-770 - resource
+   allocation without throttling). Arrives transitively via the Confluent Schema Registry client's
+   `httpclient5`; Spring Boot's `dependencyManagement` pins the vulnerable version and managed
+   versions beat Maven's nearest-wins resolution, so the fix overrides Spring Boot's
+   `httpcore5.version` property in each of the six modules that resolve the chain
+   (minimalist-kafka, twin-kafka, sync-over-async, kafka-demo, twin-kafka-demo,
+   sync-over-async-demo). The override self-retires when Spring Boot's managed version catches up.
+2. **`log4j-api` 2.25.4 → 2.26.1** (MEDIUM, CWE-116 - improper output encoding). Four poms
+   (minimalist-kafka, twin-kafka, sync-over-async, opentelemetry-forwarder) never declared the
+   `log4j2.version` property, so Spring Boot's default applied; the property is now declared
+   everywhere log4j is resolved.
+3. **`reactor-netty-http` 1.3.5 → 1.3.6** (MEDIUM, CWE-319 - cleartext transmission).
+   `reactor-bom` 2025.0.5 → 2025.0.6 across all 28 poms importing it, including the non-reactor
+   api-playground and pg-example subprojects.
+
+### Added
+
+1. **Kafka health check (`kafka.health`).** minimalist-kafka now ships a ready-made health-check
+   function for the platform's `/health` endpoint - opt in by adding `kafka.health` to
+   `mandatory.health.dependencies` (or the optional list). The probe is a single Kafka Metadata
+   request (`KafkaConsumer.listTopics`) from the module's consumer template: no consumer group, no
+   offsets, no admin privileges. During application start-up it reports a placeholder healthy status
+   while the client warms up in the background (`kafka.health.startup.grace`, default `30s`); after
+   the first successful probe an unreachable cluster fails `/health` with HTTP 503
+   (`kafka.health.timeout`, default `5s`).
+2. **Trace-continuity regression tests.** A new platform-core test drives the
+   application-to-application HTTP case end-to-end over the real HTTP stack - a traced app A
+   calling app B through `async.http.request` - asserting one continuous W3C trace across both
+   hops; outbound `X-Trace-Id` stamping (the carrier for non-W3C trace ids) is now directly
+   asserted as well.
+3. **Observability guide - header impedance matching.** New section documenting the configurable
+   trace-id / correlation-id header names: the four `application.properties` globals, per-entry
+   overrides (rest.yaml and kafka-flow-adapter.yaml), twin-kafka's `secondary.*` globals, the
+   precedence rule (per-entry > global > built-in default; W3C `traceparent` always wins for the
+   trace id), and the two-convention bridging recipe via `model.cid`.
+
+### Fixed
+
+1. **Code-quality touch-up from the field SonarQube scan.** Resolved all reported findings: two
+   bugs (an int-multiplication assigned to `long` in the scheduler sample's StateResolver; a
+   loop-with-one-iteration in a twin-kafka test helper), the new-code smells (assertThrows lambdas
+   with multiple invocations, `record` used as an identifier, superfluous `throws` clauses), the
+   example-app smells (public PoJo fields now have accessors, `HelloException` renamed to
+   `HelloExceptionHandler`, `Thread.sleep` replaced in tests, field naming and unused-field
+   cleanups), and the nine `/tmp` security hotspots in the worked examples (suppressed with
+   justification - throwaway demo data by design).
+2. **ScheduleAdminTest CI flake (scheduler-example).** The test treated state-file existence as
+   readiness, but the sample resolver's write is truncate-then-write, so the file exists while
+   still empty. The test now polls the schedule-admin endpoint for a readable record instead of
+   polling the filesystem.
+
+---
+## Version 4.8.2, 7/12/2026
+
+Patch release: the twin-kafka-demo now faithfully demonstrates cross-cluster correlation-id
+impedance matching, and Kafka client template externalization becomes an explicit opt-in.
+
+### Changed
+
+1. **twin-kafka-demo - correlation-id impedance matching.** The demo's two clusters now use
+   different business correlation-id header names (on-prem `X-Correlation-Id`, cloud
+   `X-Cloud-Correlation-Id`): each flow adapter reads its cluster's configured header into
+   `model.cid` and each bridge flow maps `model.cid` back out under the next cluster's name, so
+   the same correlation value crosses both clusters without leaking either cluster's header name.
+   The system-of-record's response leg now publishes through `secondary.kafka.notification` so the
+   response stays on the cloud cluster until the bridge consumes it. The README adds a trace/span
+   validation walkthrough. twin-kafka's own test suite gains a wire-level assertion that the bridge
+   does not leak the default header name.
+2. **Kafka client template externalization is opt-in.** The template location keys
+   (`kafka.producer.properties`, `kafka.consumer.properties`, `schema.registry.properties` and the
+   `secondary.*` counterparts) now default to the bundled classpath templates only - the
+   `file:/tmp/config/...` prefix is no longer a built-in fallback. A devops pipeline externalizes
+   configuration by pointing the location key at a rendered file, optionally with a classpath
+   fallback as a comma-separated list. **Deployments that relied on the implicit `/tmp/config`
+   fallback must now set the location keys explicitly.** Guides, configuration reference and
+   bundled template comments updated to match.
+
+### Fixed
+
+1. **CI test stability** - settled a mock-cloud loopback race in the cloud-connector
+   ServiceRegistryEdgeTest (test-only; no production code change).
+
+---
+## Version 4.8.1, 7/11/2026
+
+Maintenance and quality release: dependency security updates (closes the Jackson dependabot
+alert), a stateless random partitioner as the Kafka producer default, the twin-kafka-demo worked
+example, retirement of the unused DSA methods, and a repo-wide test-coverage program that brings
+the example apps back into the maven reactor. No breaking changes.
+
+### Added
+
+1. **twin-kafka-demo - runnable worked example for the twin-kafka module.** A profile management
+   service whose requests enter through HTTP on the on-prem side, cross a dual-cluster bridge
+   (pure flow YAML - no bridge code), and are served by a system-of-record on the cloud side, with
+   trace and business correlation ids continuous across two Kafka clusters and three apps. The
+   topology is deliberately asymmetric - on-prem with a Schema Registry (Confluent JSON Schema
+   wire format), cloud with plain JSON bytes - demonstrating the per-cluster-optional registry and
+   the decode-and-re-encode bridging rule. One jar, three Spring profiles (rest / bridge / sor),
+   with node helpers for topic administration and response observation.
+2. **SimpleRandomPartitioner - stateless random distribution as the producer default.** Kafka's
+   sticky default partitioner skews low-volume traffic onto a single partition, starving
+   multi-instance consumer groups. minimalist-kafka now defaults `partitioner.class` to a perfectly
+   stateless uniform-random partitioner (SecureRandom; no per-thread state - virtual thread
+   friendly). Explicit-partition records and keyed records (murmur2) keep their existing semantics,
+   and a template that sets its own `partitioner.class` wins. The twin-kafka secondary producer and
+   the dead-letter writer inherit the default.
+3. **Unit tests across the example apps** (rest-spring-3/4-example, scheduler-example, kafka-demo,
+   sync-over-async-demo, twin-kafka-demo, lambda-example top-up, pg-example demo-endpoint tests),
+   plus branch-coverage tests for cloud-connector, kafka-connector and service-monitor.
+
+### Changed
+
+1. **Example apps rejoined the maven reactor** (nine modules) now that they carry unit tests -
+   the reactor build compiles and tests them, and each produces a jacoco report for code quality
+   scans. pg-example stays standalone (its tests download an embedded Postgres binary).
+2. **Dependency updates:** Jackson core/databind 2.22.1 (fixes the security vulnerability tracked
+   by dependabot alert 28, previously advisory-only), log4j2 2.26.1, netty 4.2.16.Final,
+   tomcat 11.0.24 (10.1.57 for the Spring Boot 3 line), gson 2.14.0, vertx-core 5.1.4.
+
+### Removed
+
+1. **CryptoApi DSA methods retired** (`generateDsaKey`, `dsaSign`, `dsaVerify`, the DSA-selector
+   `getPublic`/`getPrivate` overloads and DSA constants). DSA support existed for historical
+   reasons and is unused in production; removing it also removes the SHA256withDSA security
+   hotspot at the source. RSA signing/verification and all other crypto functions are unchanged.
+
+---
+## Version 4.8.0, 7/10/2026
+
+Feature release: the new twin-kafka module for dual Kafka cluster bridging, configurable trace-id
+headers with per-entry overrides for legacy impedance matching, and a hardened business
+correlation-id path (model.cid mappings plus a compile-time guard for reserved metadata model keys).
+No breaking changes; single-cluster applications and existing configurations work unchanged.
+
+### Added
+
+1. **twin-kafka - dual Kafka cluster support for bridge applications.** A new `system/twin-kafka`
+   module on top of minimalist-kafka connects an application to a SECOND Kafka cluster (e.g. on-prem
+   Apache Kafka bridging to cloud Confluent Kafka): `secondary.kafka.notification` (full feature
+   parity with `simple.kafka.notification`), an optional secondary flow adapter
+   (`yaml.secondary.kafka.flow.adapter`), and an optional per-cluster Schema Registry
+   (`secondary.schema.registry.url`) - the registry is independent per cluster, so asymmetric
+   topologies (one side with a registry, one without) and Kafka-protocol-compatible services such as
+   Azure Event Hubs are supported. A bridge is plain flow YAML - consume from one cluster's adapter,
+   publish through the other cluster's notification function - with trace and correlation-id
+   continuity across both hops. Dead letters from secondary bindings land on the secondary cluster.
+   Template defaults align with kafka-standalone's `dual.servers=true` second broker for local
+   dual-cluster development. minimalist-kafka gains behavior-preserving reuse seams (template
+   location overloads, notification extension accessors, key-prefix schema codec with per-registry
+   caches) and remains unchanged for single-cluster use.
+2. **Configurable trace-id headers with per-entry overrides.** New globals `http.trace.id.header`
+   (default `X-Trace-Id`, previously hard-coded) and `kafka.trace.id.header` (unset by default;
+   inbound fallback when no W3C `traceparent` is present, outbound stamped alongside `traceparent`
+   for legacy consumers). A rest.yaml endpoint entry or kafka-flow-adapter.yaml consumer binding may
+   override the header names with the optional `trace.id.header` / `correlation.id.header` keys -
+   impedance matching for pre-existing and third-party systems, with precedence
+   per-entry > global > built-in default. The W3C `traceparent` standard always takes precedence for
+   the trace-id.
+
+### Changed
+
+1. **Reliable business correlation-id in flows.** Shipped flows map the correlation-id from
+   `model.cid` (engine-seeded from the configured header) instead of the raw Kafka record header, so
+   an overridden header name (e.g. `X-Correlation-ID`) propagates correctly; the redundant
+   header-echo re-capture was removed. `CompileFlows` now rejects any data mapping that would
+   overwrite reserved state-machine metadata (`model.cid`, `model.instance`, `model.flow`,
+   `model.ttl`) with a precise startup error.
+2. Final SonarQube code smells resolved, including IDE-flagged touch-ups across the new modules.
+
+---
+## Version 4.7.1, 7/9/2026
+
+Field-driven update for the minimalist-kafka module: OAuth 2.0 authentication for the Schema Registry
+protocol and automatic allow-listing of OAuth token endpoint URLs, closing the loose ends found during
+the 4.6.3 field deployment. Also resolves the final four SonarQube code smells from the field scan.
+No breaking changes.
+
+### Added
+
+1. **Schema Registry OAuth 2.0 (client credentials).** A new `schema-registry.properties` template
+   carries the Confluent Schema Registry client configuration, making the Kafka configuration set
+   consistent: `kafka-producer.properties` / `kafka-consumer.properties` / `schema-registry.properties`
+   (file-then-classpath fallback, `${ENV_VAR:default}` substitution), while `schema.registry.url` stays
+   in `application.properties` as the feature switch. Template entries pass verbatim to the Confluent
+   client, so bearer auth (`bearer.auth.credentials.source=OAUTHBEARER` with issuer endpoint, client id,
+   client secret and scope), optional installation-specific parameters (`bearer.auth.logical.cluster`,
+   `bearer.auth.identity.pool.id`), `SASL_OAUTHBEARER_INHERIT`, `STATIC_TOKEN`, basic auth and SSL
+   settings work without library changes. The bearer token is cached and refreshed before expiry.
+2. **OAuth token URL allow-list automation.** Token endpoint URLs found in any of the three templates
+   (`sasl.oauthbearer.token.endpoint.url`, `bearer.auth.issuer.endpoint.url`) are registered on the JVM
+   allow-list system property `org.apache.kafka.sasl.oauthbearer.allowed.urls` before client
+   construction - merged and deduplicated, never clobbering an operator-set value - removing the manual
+   `System.setProperty` workaround previously needed by field applications.
+
+### Changed
+
+1. **Final field-scan code smells resolved.** JUnit 5 lifecycle method visibility, `EtagFile` field
+   encapsulation, an intentional-singleton suppression, and IDE-flagged touch ups (`ReentrantLock`
+   instead of `synchronized` for virtual-thread friendliness, conditional log arguments, an unused
+   constructor, an unnecessary null check).
+
+---
 ## Version 4.7.0, 7/8/2026
 
 Feature release: the MiniGraph engine gains the `graph.task` skill, so a graph node can invoke any
@@ -202,7 +1099,7 @@ analysis, adds two opt-in OTLP exporter tunables, and removes the `com.google.pr
    security gate. **JSON Schema and Avro are unaffected and fully supported.** This is tracked as a backlog
    item, to be re-wired once Confluent moves to the patched coordinate, or sooner for a specific field
    installation that explicitly needs Protobuf and accepts the residual risk. See the
-   [Kafka Flow Adapter guide](docs/guides/kafka-flow-adapter.md#schema) for detail.
+   [Kafka Flow Adapter guide](docs/guides/minimalist-kafka.md#schema) for detail.
 2. **`trace.http.header` and `trace.http.legacy.header.enabled` configuration parameters were removed.**
    Before OpenTelemetry support, `X-Correlation-Id` was mistakenly allowed to double as a trace ID via
    `trace.http.header`; that conflation is retired. Use `X-Trace-Id` / W3C `traceparent` for the trace ID,

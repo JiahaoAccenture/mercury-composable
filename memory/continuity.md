@@ -16,9 +16,9 @@
 - **status:** active, mature framework (Maven reactor)
 - **repo:** github.com/Accenture/mercury-composable (official — source of truth)
 - **last_enabled:** 2026-06-20
-- **last_session:** 2026-07-30 | agent: Codex (2026-07-30-145521)
-- **last_review:** 2026-07-30 | through 2026-07-30-145521.md
-- **last_invariant_check:** 2026-07-30 | 2026-07-30-145521.md (re-verify re-prompted — cadence reset; pending Eric via Open Thread thread-reverify-invariants-2026q2)
+- **last_session:** 2026-07-30 | agent: Codex (2026-07-30-170428)
+- **last_review:** 2026-07-30 | through 2026-07-30-170428.md
+- **last_invariant_check:** 2026-07-27 | 2026-07-27-215011.md (all 15 confirmed by Eric — one-by-one walkthrough with live-tree evidence; thread-reverify-invariants-2026q2 closed)
 
 > This agent-memory layer was seeded on 2026-06-20 from a prior prototyping
 > environment, carrying forward only the confirmed Vision + Blueprint and the
@@ -41,7 +41,6 @@
   <!-- id: stack-messaging-kafka | created: 2026-06-20 | last_used: 2026-06-24 | uses: 2 | tier: core -->
 - CI: GitHub Actions (`.github/workflows/`)
   <!-- id: stack-ci-gha | created: 2026-06-20 | last_used: 2026-06-24 | uses: 2 | tier: core -->
-
 ## Architectural Invariants
 
 > Hard constraints that must never change. These never decay (`core`).
@@ -64,75 +63,191 @@
 ## Key Decisions
 
 - **MiniGraph Graph View automatic layout is crossing-aware (2026-07-30, branch
-  `edge-crossing-issue-fix`).** `transformGraphData` preserves the existing left-to-right ranks,
+  `ui-loop-engineer-with-visual-edge-and-edge-crossing`).** `transformGraphData` preserves the existing left-to-right ranks,
   component/orphan policy, Bezier renderer, and graph semantics while applying deterministic
   barycentric ordering, capped virtual long-edge slots, bounded local insertion search, and actual
   forward-Bezier/node-body scoring. Work caps deliberately degrade pathological graphs to
   best-effort ordering; non-planar/cyclic graphs and post-render manual movement are not promised
   zero crossings. The delivery contract and verification evidence live in
   `webapp/docs/Graph Edge Crossing Minimization Spec.md`.
-  <!-- id: minigraph-crossing-aware-layout | created: 2026-07-30 | last_used: 2026-07-30 | uses: 1 | tier: working | origin: 2026-07-30-145521 -->
+  <!-- id: minigraph-crossing-aware-layout | created: 2026-07-30 | last_used: 2026-07-30 | uses: 2 | tier: active | origin: 2026-07-30-145521 -->
 
-- **Release 4.7.0 — SHIPPED 2026-07-08 (tag `v4.7.0` on merge commit `e41a20b7`; PRs #146 feature +
-  #147 bump).** Feature release: **MiniGraph `graph.task` skill** — a Task node invokes any composable
-  function (`@PreLoad` route) with Event Script style `input[]`/`output[]` mapping (`*` whole-body
-  sequential merge, `header.{name}`, PoJo auto-conversion, `for_each[]`+`concurrency` fork-join,
-  `exception=` routing); plus tutorial-13 (deployed graph + help topics) and playground UI bundle
-  refresh. **STRATEGIC (Eric): graph.task is intended to be the LAST built-in skill** — custom logic
-  now enters a graph as a composable function; flows/subgraphs (graph.extension) remain for
-  orchestration. **Durable caveats:** (1) **new-skill/tutorial checklist** — a shipped `help graph-*.md`
-  page MUST have a matching entry in `docs/guides/knowledge-graph/minigraph-commands.json` and the docs
-  mirror (skills-reference, command-reference matrix, index tables — "eight skills" counts); CI's
-  `scripts/check-minigraph-grammar.py` anti-drift gate fails the PR otherwise (caught live on PR #146);
-  (2) `help.md` topic index is hand-maintained — new skills/tutorials must be added there too;
-  (3) test-only tutorial graphs are numbered 1xx (tutorial-113/114) so deployed tutorials own the
-  canonical names. Release-bump surface and prior caveats unchanged — see [[release-4-6-2-shipped]].
-  <!-- id: release-4-7-0-shipped | created: 2026-07-08 | last_used: 2026-07-08 | uses: 1 | tier: active | origin: 2026-07-08-224933 -->
+- **Release 4.8.3 — SHIPPED 2026-07-13 (tag `v4.8.3` on merge commit `6696a76f`; PRs #168-#175).**
+  Security patch + hardening release, validated by the field pipeline (Snyk + Sonar PASSED) BEFORE
+  tagging — the deliberate deferred-tag flow worked as designed. Contents: (1) **Snyk remediation**
+  (#168 — httpcore5 5.4.3 via SB property override, log4j-api 2.26.1, reactor-netty 1.3.6);
+  (2) **trace-continuity regression guards** (#169 HTTP app-to-app, #175 declarative flow task incl.
+  the sink-after-response shape — BOTH verified passing on v4.7.1 too, so the field's declarative
+  report was environmental, not a framework defect); (3) **observability + REST per-entry header docs**
+  (#169/#172); (4) **ScheduleAdminTest + SonarQube touch-up** (#170/#173 — file-existence ≠ readiness;
+  HelloException → HelloExceptionHandler; S5443 suppressions per ProfileStore precedent);
+  (5) **kafka.health** (#174 — `KafkaConsumer.listTopics` Metadata probe needs NO ACL: brokers filter
+  by Topic Describe rather than reject, so it degrades to an empty-but-successful response under
+  locked-down principals; startup grace returns placeholder-healthy while the client warms up on a
+  background virtual thread; `kafka.health.timeout` 5s / `kafka.health.startup.grace` 30s).
+  **Durable lessons:** field screenshots' naming conventions are client-identifiable — paraphrase
+  generically in fixtures/commits/PRs; a flow needs ≥1 `end` task (a `sink` only terminates a side
+  branch). See [[release-4-8-2-shipped]] for the prior cycle.
+  <!-- id: release-4-8-3-shipped | created: 2026-07-13 | last_used: 2026-07-24 | uses: 10 | tier: archive-candidate | origin: 2026-07-13-170933 -->
 
-- **Release 4.6.2 — SHIPPED 2026-07-07 (tag `v4.6.2` on merge commit `56ac1067`; PRs #140 remediation +
-  #141 bump).** SonarQube quality-gate remediation (1 blocker, 24 criticals, 83 majors, smells — all
-  behavior-preserving) + kafka-connector/kafka-presence unit test suites. **Durable caveats carried
-  forward:** (1) **do NOT remove the explicit `com.google.guava:failureaccess:1.0.3` pins** in
-  minimalist-kafka/sync-over-async (+ Guava 33.5.0 pins in kafka-demo/sync-over-async-demo) — they
-  guarantee the class under strict field dependency resolution (Confluent pulls Guava 32.0.1 nearest-wins;
-  see archived [[thread-guava-failureaccess-field-fix]]); (2) **kafka-standalone runnable jar is
-  `kafka-standalone-<version>-exec.jar`** — the main artifact is a plain library jar so modules can depend
-  on it (kafka-connector tests do); the Dockerfile carries the literal name and must be bumped each release;
-  (3) **docs/guides + all module READMEs use the `x.y.z` version placeholder** — release bumps touch only
-  poms, the kafka-standalone Dockerfile, root CLAUDE/GEMINI headers, OtelForwarderContext.VERSION and the
-  CHANGELOG; (4) kafka-connector's embedded-broker tests rely on kafka-standalone's `@MainApplication`
-  (seq 10) owning the broker — never start a second `EmbeddedKafka` in the same JVM (its formatStorage
-  wipes `/tmp/kafka-logs` under the running broker → Kafka fatal Exit(1)).
-  **UPDATE 2026-07-07: v4.6.3 shipped the same day** (tag on merge commit `4c709484`; PRs #143 cleanup +
-  #144 bump) — maintenance on top of 4.6.2: final smell suppressions, model encapsulation,
-  playground `random` → SecureRandom. All caveats above still apply. Field Sonar dashboard: gate PASSED,
-  0 vuln / 0 bugs / smells rating A; only the CryptoApi DSA hotspot awaits "Safe" review in the Sonar UI.
-  <!-- id: release-4-6-2-shipped | created: 2026-07-07 | last_used: 2026-07-08 | uses: 4 | tier: archive-candidate | origin: 2026-07-07-163607 -->
+- **Field trace-propagation report on 4.6.3 diagnosed (2026-07-13): not a framework bug.** A field team
+  saw the traceId stop propagating between application endpoints after upgrading 4.4.11 → 4.6.3. Root
+  cause: **v4.5.0's documented breaking tracing cleanup** — `trace.http.header` /
+  `trace.http.legacy.header.enabled` removed, so `X-Correlation-Id` no longer doubles as the trace id
+  (the pre-4.5.0 conflation is what made 4.4.x setups appear to propagate); the trace id now travels
+  only as `X-Trace-Id` / W3C `traceparent`, never echoed back. **Support checklist for this symptom:**
+  (1) `tracing: true` on every rest.yaml entry involved (per-endpoint, default FALSE — without it the
+  endpoint ignores inbound trace headers); (2) app-to-app calls must go through `async.http.request`
+  (only the framework HTTP client auto-stamps X-Trace-Id + traceparent; custom/Spring clients must
+  forward `traceparent` manually); (3) trace context is thread-bound (Mono path fixed in 4.6.x —
+  [[trace-thread-keyed-mono-gotcha]]). **Validated**: live sync-over-async-demo (2 JVMs, curl with a
+  caller traceparent → one continuous trace, spans chained onto the caller's span across both Kafka
+  hops) + new regression test `traceContinuesAcrossApplicationToApplicationHttpCall`
+  (branch `test/trace-continuity-http-hop`, `DownstreamCaller` fixture + `/api/chain/probe`) proving
+  traced app-to-app HTTP continuity over the real HTTP stack — a previously untested contract.
+  <!-- id: field-trace-propagation-4-6-3-diagnosis | created: 2026-07-13 | last_used: 2026-07-24 | uses: 5 | tier: archive-candidate | origin: 2026-07-13-142021 -->
 
-- **Release 4.6.1 — security + maintenance patch on top of 4.6.0 (2026-07-06, branch `chore/release-4.6.1`,
-  Claude Code).** 4.6.0 was already GitHub-released (tag `v4.6.0`, immutable); rather than recall/re-tag it,
-  Eric chose to supersede with a clean 4.6.1 (treat a published release as immutable). **Scope:** (1) **Snyk
-  OSS fixes** — `org.postgresql:r2dbc-postgresql` 1.1.1→1.1.2 in `examples/pg-example` +
-  `extensions/reactive-postgres`, plus direct `com.ongres.scram:scram-client`/`scram-common` `3.3` deps that
-  override the transitive **vulnerable 3.2** r2dbc-postgresql 1.1.2 pulls in (same coords + major → nearest-wins,
-  no leftover 3.2; Eric confirmed Snyk wants 3.3); (2) **`opentelemetry-forwarder` — protobuf runtime removed
-  from the module entirely** — OTel BOM 1.45.0→1.63.0 and dropped the test-scoped
-  `io.opentelemetry.proto:opentelemetry-proto` (the only thing pulling in `com.google.protobuf`, retired for a
-  no-fix CVE). Verified `com.google.protobuf` resolves on **no scope**. Production export path was already
-  protobuf-java-free (OTLP/HTTP exporter uses OTel's internal marshaler in `opentelemetry-exporter-otlp-common`,
-  not protobuf-java). **`MockOtlpCollector` (test) rewritten** to decode OTLP protobuf with a small hand-rolled
-  wire-format `ProtoReader` (no generated classes); full round-trip coverage retained (22 tests green). Key bug
-  found+fixed during the rewrite: a `pos += (int) readVarint()` compound-assignment discarded the read-advance
-  (Java captures the LHS before the RHS mutates `pos`). (3) **Added two OTLP exporter tunables** —
-  `otel.exporter.otlp.compression` (`gzip`/`none`, default `none`) + `otel.exporter.otlp.connect.timeout`
-  (ms, default 10000), wired via a new 5-arg `OtelForwarderContext.buildExporter` (old 3-arg kept, defaults
-  unchanged). Harness limitation noted: Mercury REST automation delivers a `null` body for a gzip-encoded
-  request, so the gzip test asserts `Content-Encoding: gzip` on the wire rather than an inflate-decode round-trip.
-  **Version bump 4.6.0→4.6.1:** 31 module poms + CHANGELOG (Security/Added/Changed) + docs/guides + example/helper
-  READMEs + CLAUDE.md/GEMINI.md + memory current-version refs. **Pre-existing, left as-is:** `OtelForwarderContext.VERSION`
-  instrumentation-scope constant still reads `4.5.0` (was not bumped for 4.6.0 either — out of release scope; flagged).
-  See [[thread-release-4.6.1-field-scan]] and the earlier [[snyk-oss-dependency-update-2026-07]].
-  <!-- id: release-4.6.1-security-patch | created: 2026-07-06 | last_used: 2026-07-06 | uses: 1 | tier: working | origin: 2026-07-06-164315 -->
+- **Release 4.8.2 — SHIPPED 2026-07-12 (tag `v4.8.2` on merge commit `6c024311`; PRs #164-#166).**
+  Patch release: twin-kafka-demo correlation-id impedance matching + opt-in template
+  externalization. Cross-vendor loop precedent: GitHub Copilot authored the patch (its session log
+  2026-07-13-001009), crashed mid-task; Claude Code reviewed all edits, completed the crash gap
+  (twin-kafka.md table, configuration-reference rows, sync-over-async properties) and committed with
+  dual attribution (one Co-Authored-By per collaborator per AGENTS.md). **Durable facts:**
+  (1) **Impedance matching is the demo pattern:** each cluster keeps its own business
+  correlation-id header (on-prem X-Correlation-Id, cloud X-Cloud-Correlation-Id); adapters read the
+  cluster header into model.cid, flows map model.cid back out under the NEXT cluster's name — never
+  leak a cluster's header name across the bridge (twin-kafka tests assert this at the wire level).
+  (2) **Template externalization is OPT-IN** (scope: minimalist-kafka/twin-kafka family only):
+  KafkaClientConfig + SecondaryKafkaAutoStart location defaults are classpath-only; devops
+  pipelines set the location key to a rendered file, optionally with a classpath fallback chain —
+  field migration note in the 4.8.2 CHANGELOG (deployments relying on the implicit /tmp/config
+  fallback must set keys explicitly). Legacy connector stack + mini-scheduler keep their own
+  file-first conventions. (3) **SOR response leg publishes via secondary.kafka.notification** —
+  the demo response stays on the cloud cluster until the bridge consumes it; Spring profiles are
+  logical personalities, not security boundaries (README documents that real isolation needs
+  separate deployment/credentials/network policy). (4) **Release-sweep gotcha:** when the outgoing
+  version is a substring of a dependency version (classgraph 4.8.184 contains "4.8.1"), the perl
+  sweep needs a digit lookahead `(?!\d)` — not every bump is naturally safe.
+  See [[release-4-8-1-shipped]] for the prior cycle's facts.
+  <!-- id: release-4-8-2-shipped | created: 2026-07-12 | last_used: 2026-07-24 | uses: 5 | tier: archive-candidate | origin: 2026-07-13-014037 -->
+
+- **Release 4.8.1 — SHIPPED 2026-07-11 (tag `v4.8.1` on merge commit `3d226c5b`; PRs #159-#161).**
+  Maintenance release: dependency security updates (Jackson 2.22.1 closed dependabot/28; log4j2/
+  netty/tomcat/gson/vertx refreshed), twin-kafka-demo, SimpleRandomPartitioner, DSA retirement and
+  the repo-wide coverage program. **Durable facts:** (1) **SimpleRandomPartitioner is
+  minimalist-kafka's producer DEFAULT** (`putIfAbsent` in KafkaClientConfig — a template's own
+  `partitioner.class` wins; explicit `partition` header bypasses partitioners; keyed records keep
+  murmur2; SecureRandom shared instance — ThreadLocal avoided per repo convention). Kafka's sticky
+  default starves multi-instance consumer groups at low volume — proven in the demo (all-on-one
+  partition before, spread after). (2) **CryptoApi DSA methods REMOVED** (4.8.1) — the SHA256withDSA
+  field-Sonar hotspot is resolved at the source; no UI disposition needed. (3) **Ten example modules
+  build+test inside the reactor** (pg-example standalone: embedded-postgres binary download;
+  benchmark-reporter off) — release-bump sweep is now 32 poms; CI runs ~918 tests. (4) **Coverage
+  aggregate 85.8% line / 80.0% Sonar-combined** — zero margin: field Sonar config should exclude
+  `benchmark/**` (938 untested lines), and pg-example's coverage needs its own `mvn test` in the
+  pipeline. kafka-connector's remaining gap (topic substitution + boot branches) needs a second
+  test-app config — not reachable in one JVM. (5) **Flow-authoring conventions** (learned via
+  twin-kafka-demo, examples/twin-kafka-demo): the engine does NOT auto-convert a Map into a
+  byte[]-typed function — use `f:binary(model.x) -> *` (the `:binary` colon shorthand is
+  DEPRECATED); set `text(application/json) -> output.header.content-type` on flow HTTP responses
+  (platform-core otherwise content-negotiates from the request's accept header). (6) **No version
+  strings in pom comments** — the release sweep mangled a historical "retired 4.8.0" note; history
+  belongs in the CHANGELOG. See [[release-4-8-0-shipped]] for the twin-kafka architecture facts.
+  <!-- id: release-4-8-1-shipped | created: 2026-07-11 | last_used: 2026-07-27 | uses: 8 | tier: archive-candidate | origin: 2026-07-12-002326 -->
+
+- **Release 4.8.0 — SHIPPED 2026-07-10 (tag `v4.8.0` on merge commit `5d9fda45`; PRs #153-#157).**
+  Feature release: **twin-kafka** (dual Kafka cluster bridging), configurable trace-id headers with
+  per-entry overrides, and the hardened model.cid path. **Durable architecture facts:**
+  (1) **twin-kafka is a separate `system/` module depending on minimalist-kafka** — dual-cluster is a
+  special case; single-cluster apps must never carry its weight. Naming: module twin-kafka, artifacts
+  `secondary.*` (plain English; "gemini" rejected — GEMINI.md/Google clash). A bridge is flow YAML:
+  consume via one adapter, publish via the other cluster's notification function; trace + model.cid
+  continuous across both hops. (2) **Reuse seams in minimalist-kafka** (behavior-preserving):
+  KafkaClientConfig location-key overloads; SimpleKafkaNotification protected accessors (publisher/
+  codec/header names/registryUrlKey); SchemaCodec.fromConfig(config, url, keyPrefix) deriving keys,
+  serde prefix, template location AND ManagedCache names from the prefix — **distinct caches per
+  registry are a correctness requirement** (Confluent global schema ids are per-registry; bridging
+  framed payloads = decode-and-re-encode via schema.enabled + subject, NEVER relay raw framed bytes).
+  (3) Registry is optional PER CLUSTER (real-world: on-prem Apache + cloud Confluent); Azure Event
+  Hubs works via the Kafka endpoint (no Confluent registry, pre-provisioned topics). (4) DLQ
+  correctness: RetryPolicy carries the publisher → secondary dead letters land on the secondary
+  cluster. (5) kafka-standalone `dual.servers=true` = broker 9092 + broker 8092; twin templates
+  default to 8092. (6) **Header-name precedence** (both surfaces): per-entry (rest.yaml /
+  kafka-flow-adapter.yaml `trace.id.header`/`correlation.id.header`) > application.properties global
+  (`http/kafka.trace.id.header`, `http/kafka.correlation.id.header`) > built-in default; W3C
+  traceparent always wins for the trace-id. (7) **Flow convention:** map the business correlation-id
+  from `model.cid` (engine-seeded), never from the raw record header; CompileFlows rejects data
+  mappings that overwrite reserved model keys (cid/instance/flow/ttl). See [[release-4-7-0-shipped]]
+  for the release-bump surface and prior caveats.
+  <!-- id: release-4-8-0-shipped | created: 2026-07-10 | last_used: 2026-07-24 | uses: 8 | tier: archive-candidate | origin: 2026-07-11-031930 -->
+
+- **Graph workflow suspension: short runs + external state store, encapsulated in skills
+  (design ratified by Eric 2026-07-28). (ADR-0010)** A human checkpoint = persist
+  {cid, node, ttl, model minus reserved keys, seen, run} via `skill=graph.suspend` and
+  complete the run; resume = same business cid restores state and jumps past the
+  checkpoint without re-execution (`graph.resume`, `resume:<alias>` directive). Both
+  skills are supersets of graph.task invoking a pluggable store function (`task=`) with a
+  fixed put/get contract — zero node data mapping. `suspend` = reserved node ALIAS
+  (root/end pattern, jump-by-name, one per graph, alias⇔skill enforced, drawn checkpoint
+  edge required); `suspend=true` = reserved property; `ttl` = mandatory task
+  parameter, no default; types are visual convention (skill defines behavior).
+  **Production-polish refinement (Eric's field code review, 2026-07-29):** the optional
+  `missing=<node>` property was ELIMINATED — with multiple suspension points one fallback
+  node is ambiguous; absent and expired records look the same by design, and handling the
+  condition is application logic on the resume node's forward path (graph.math
+  IF-THEN-ELSE / graph.task), documented not framework-solved. Instead `graph.resume`
+  sets the engine-managed flag **`model.run` = `resume` | `fresh`** (after the model
+  merge so a stale persisted value can never resurrect it; excluded from persistence)
+  so the graph advises the UI or jumps to recovery — tutorial-14 stages it into every
+  reply.
+  Consume-on-retrieve (Redis GETDEL) = at-most-once resume. Constraints: sole active
+  branch; model is the workflow's durable memory ({node}.result does not survive); cid =
+  resume capability (auth resume endpoints); no graph.extension crossing. Store: Redis =
+  extensions/minigraph-state-redis imported by apps, NEVER the engine; engine tests use a
+  temp-file store. Delivered by [[thread-graph-suspend-resume]] (P1-P4); serves
+  [[bp-graph-workflow-suspension]].
+  <!-- id: graph-suspend-resume-design | created: 2026-07-29 | last_used: 2026-07-30 | uses: 4 | tier: active | origin: 2026-07-29-010343 -->
+
+- **CompileGraph is the MANDATORY deployment gate for graph models — CompileFlows parity
+  (Eric's rulings, 2026-07-29, production-polish round; ADR-0011 ACCEPTED via the
+  PR #240 merge, squash `4348b0da`).** A deployed graph is executable at `POST /api/graph/{graph-id}` only when
+  listed in the manifest (`graph.model.automation`) AND passing the gate; failed or
+  unlisted = HTTP-404 as if nonexistent; lazy per-request loading DELETED (a rejected-graph
+  registry was built then superseded — "compiled or 404" is the whole rule). The manifest
+  carries its own `location` (default `classpath:/graph`, the flows.yaml convention) —
+  `location.graph.deployed` retired (obsolete-key startup warning; GraphCommandService
+  reads the resolved location from CompiledGraphs). **Two-lane validation:** production =
+  models → CompileGraph → deployed → GraphExecutor (trusts the gate; keeps only
+  data-driven guards — store-record checks, dynamic jump targets, loop breaker,
+  po.exists); dry-run = /tmp/graph drafts → UI CLI validation at node create/update →
+  GraphTraveler with FULL runtime validation (the CLI validates zero suspend/resume
+  semantics — verified by inventory). Gate rules absorbed from the executor: mandatory
+  `end` node; continuation edge on every suspension point; plus mapping-entry rejection
+  (property-aware: bare `input` entries are fetcher vocabulary, never rejected).
+  Whole-graph rules modularized in `GraphModelValidator` (common), reused by the
+  playground `run` command as a pre-run check ("Unable to run - <reason>" + the uniform
+  aborted terminal; partial drafts stay allowed at authoring time) — also the landing pad
+  for [[thread-compilegraph-syntax-validation]]. Hot-dropping JSON into the deploy folder
+  no longer executes (deployment = explicit act, per the governance lifecycle).
+  <!-- id: compilegraph-mandatory-gate | created: 2026-07-29 | last_used: 2026-07-30 | uses: 2 | tier: active | origin: 2026-07-29-190328 -->
+
+- **ManagedCache eviction: Java accepts + documents non-determinism; Rust is strict LRU —
+  a deliberate cross-engine asymmetry (Eric, 2026-07-27).** Java's `ManagedCache` keeps
+  Caffeine (3.2.4) W-TinyLFU: under `maxItems` pressure eviction is approximate and
+  non-deterministic (frequency-based admission + anti-HashDoS jitter admitting 1/128
+  losing candidates at random + lossy read buffers; no policy knob exists in the builder).
+  Javadoc on both `createCache` overloads + CHANGELOG state it; callers must never rely on
+  which entry survives nor assert eviction victims. The Rust port's ManagedCache is moka
+  `EvictionPolicy::lru()` (deterministic; increment 71, Rust PR #185) per Eric's
+  "deterministic eviction" ruling there. Eviction is internal state, NOT a presentation
+  surface — [[conv-telemetry-presentation-parity]] does not require closing this gap.
+  **"Frequency aging" is NOT a determinism remediation** (investigated vs the pinned jar:
+  `FrequencySketch.reset()` already ages counters; aging fixes stale popularity, not
+  reproducibility). Revisit trigger: the first consumer that truly runs at capacity
+  (schema-registry caches are the candidate); today every caller uses the 2-arg form
+  (default maxItems 2000, nothing close). Full handoff + options record:
+  the Rust repo's docs/design/managed-cache-port.md.
+  <!-- id: managed-cache-eviction-determinism | created: 2026-07-28 | last_used: 2026-07-28 | uses: 1 | tier: active | origin: 2026-07-28-005814 -->
 
 - **platform-core gotcha: the per-function trace context is thread-id-keyed and torn down when the worker
   returns.** `EventEmitter.traces` is keyed by `Thread.currentThread().threadId()+instance+route`, and
@@ -182,12 +297,49 @@
   <!-- id: event-script-over-code | created: 2026-06-27 | last_used: 2026-06-27 | uses: 1 | tier: core -->
 ## Conventions
 
+- **Registration metadata is a cross-language contract; carriers are per-language idioms.
+  (ADR-0009)** One canonical model + fixed semantics for @PreLoad and family (boot-time
+  envInstances resolution; OptionalService OR/!/= grammar; order-free marker stacking; one
+  conflict policy — explicit > declarative, duplicates WARN + last-wins; extension-point
+  naming: explicit positional name or same-name derivation from idiomatic declarations;
+  plugins = flow vocabulary never gated, features honor gating; discover → register →
+  override → resolve → validate → route table; loud-failure discovery; misuse is a tested
+  error surface). Spec: docs/guides/registration-metadata-contract.md. Conformance:
+  golden vectors shared verbatim (registration-vectors/{core,plugin,feature}.json) — the
+  wire-format golden-vector method applied to the declaration surface. New ports pass the
+  three vector suites before their declaration surface is done.
+  <!-- id: registration-metadata-contract | created: 2026-07-26 | last_used: 2026-07-29 | uses: 3 | tier: active | origin: 2026-07-25-235904 -->
+
+- **Telemetry/log presentation parity across language engines is a field requirement (Eric,
+  2026-07-23).** Rationale: even after the Rust engine is accepted into the field, installations
+  will be POLYGLOT for a long time — DevSecOps teams see both engines' telemetry and logs in one
+  aggregation, and any presentation difference (record shapes, span topology, context-block
+  gating, header hygiene) is a support burden they will flag. Operating rule: the Java engine is
+  the REFERENCE implementation; a same-language interop run (java-to-java vs rust-to-rust) must
+  be an exact structural replica after normalizing volatile fields — then cross-language runs are
+  symmetric by construction. Reference signature procedure established 2026-07-23
+  (normalized record set: service names, symbolic parent edges, round_trip vs exec-only kind,
+  paths, one-record-per-span, no dangling parents, my_*-free response headers, context-gating).
+  **Scope extension (Eric, 2026-07-23): the Event Script surface is part of the cross-engine
+  contract** — flows are engine-portable YAML, so any new built-in simple plugin ships in
+  lock-step on both engines (with closely matching error messages — presentation parity extends
+  to error text), or flows stop being portable. Precedent: the #220 collection plugins mirrored
+  into the Rust v4.10.2.
+  <!-- id: conv-telemetry-presentation-parity | created: 2026-07-23 | last_used: 2026-07-30 | uses: 11 | tier: active | origin: 2026-07-23-145132 -->
+
+- **The `helpers/` standalone servers exist for Docker-less developer machines and are
+  the standard local test servers for Rust ports (Eric, 2026-07-29).** They embed REAL
+  redis/kafka servers as plain `java -jar` apps because many field developers work on
+  Windows — especially VDI environments with no virtualization system, where Docker/
+  Testcontainers are unavailable. Usage convention: redis-standalone serves the Rust
+  minigraph-playground (suspend/resume live drives); kafka-standalone + the
+  schema-registry mock will serve the future minimalist-kafka Rust port.
+  <!-- id: conv-helpers-docker-less | created: 2026-07-29 | last_used: 2026-07-30 | uses: 1 | tier: working | origin: 2026-07-29-190328 -->
 - Add capability: function (`@PreLoad` + `TypedLambdaFunction`) → flow YAML →
   register in `flows.yaml` → `rest.yaml` mapping if HTTP-facing.
   <!-- id: conv-add-capability | created: 2026-06-20 | last_used: 2026-06-24 | uses: 2 | tier: core -->
 - Watch serialization gotchas (Long↔Integer downcast; use `util.str2int/str2long`).
   <!-- id: conv-serialization-gotchas | created: 2026-06-20 | last_used: 2026-06-24 | uses: 2 | tier: core -->
-
 ## Blueprint  *(gap from Current State → Vision; `(blueprint)` threads serve `vision-mercury-composable`)*
 
 - [ ] (blueprint) Integrate a **pluggable AI companion LLM backend**; mature `POST /api/companion/{id}`
@@ -196,17 +348,436 @@
 - [ ] (blueprint) **Enterprise governance lifecycle** for graph models (dry-run → certify → stage →
   approve → production), so models promote to production as standard endpoints. → serves: vision-mercury-composable
   <!-- id: bp-graph-governance-lifecycle | created: 2026-06-20 | last_used: 2026-06-21 | uses: 1 | tier: working -->
+- [ ] (blueprint — RATIFIED by Eric 2026-07-28) **Workflow suspension for the Active Knowledge
+  Graph** — human-in-the-loop checkpoints (approval, intervention, inbox notification) as
+  first-class graph vocabulary: suspend/resume via pluggable external state stores, so a graph
+  model expresses a long-running business process as a sequence of short runs. Realized by
+  [[thread-graph-suspend-resume]]. → serves: vision-mercury-composable
+  <!-- id: bp-graph-workflow-suspension | created: 2026-07-28 | last_used: 2026-07-30 | uses: 4 | tier: working | origin: 2026-07-29-003528 -->
 
 ## Open Threads
 
-- [ ] (release cut — Claude Code, 2026-07-06, branch `chore/release-4.6.1`, committed + tagged `v4.6.1` locally,
-  **not pushed**) **4.6.1 security patch → field SCA + Snyk re-scan.** Full detail in the Key Decision
-  [[release-4.6.1-security-patch]]. Local build green (opentelemetry-forwarder 22/22; reactor `mvn validate`).
-  **Next (Eric):** push branch → PR → merge to `main` (protected, per 4.6.0/#138 flow) → publish GitHub release
-  tag `v4.6.1` on the merge commit; then run the field static-code-analysis + Snyk scan to confirm the r2dbc/SCRAM
-  + protobuf-removal remediations clear. The local `v4.6.1` tag points at the branch commit — re-tag on the merge
-  commit at release-publish (mirrors how `v4.6.0` was created on publish). Relates [[snyk-oss-dependency-update-2026-07]].
-  <!-- id: thread-release-4.6.1-field-scan | created: 2026-07-06 | last_used: 2026-07-06 | uses: 1 | tier: working | origin: 2026-07-06-164315 -->
+- [x] (feature — COMPLETE: **P5 Rust lock-step arc MERGED 2026-07-30 as mercury PR #186**
+  (five commits `304fc5a0`→`9326cf55`; 296 tests/clippy 0; Rust ADR twins accepted via the
+  merge; Java-side 5-lens consistency review confirmed 22 findings incl. 4 blockers — the
+  composite-path forged-record bypass, the missing instantiate auto-cid edge, the walker
+  seen-marking race, RESERVED_PARAMETERS missing 'suspend' — all fixed; live drive vs the
+  real redis-standalone helper matched the Java reply contract byte-for-byte with correct
+  cid/span presentation. Reciprocal Java pin: branch `test/pin-restore-putall-immunity`
+  commit `198869b3`, awaiting Eric's PR-or-release-prep call. Both engines now carry the
+  IDENTICAL suspend/resume surface — the whole P1-P5 arc is done.) **P1-P4 MERGED 2026-07-28 as
+  [PR #238](https://github.com/Accenture/mercury-composable/pull/238), squash `168527ff`;
+  ADR-0010 thereby ACCEPTED (the merge was the ledger gate). Eric drove three manual-test
+  refinement rounds before merging: business-cid fidelity (walkers stamp the my_cid tag
+  from model.cid; log-context $cid in PLATFORM-CORE now business-first), tutorial-14 as a
+  THREE-checkpoint purchase workflow (order/approval/delivery, 4 runs, order-first input
+  validation via the null-safe text() probe + declarative output.status), and span
+  lineage (the four Mono-wrapped skills issue eRequest on the worker thread — store/task/
+  extension calls chain onto their skill spans; no-re-execution now visible in trace
+  topology). Final validation log: perfect score on traceId/spanId/parentSpanId/business
+  cid. **Production-polish round MERGED 2026-07-29 as
+  [PR #240](https://github.com/Accenture/mercury-composable/pull/240), squash
+  `4348b0da`; ADR-0011 thereby ACCEPTED (the merge was the ledger gate). Eric's IDE
+  review + SonarQube scan PASSED before the PR:** `missing=<node>` eliminated + engine-managed `model.run` flag; a four-lens
+  adversarially-verified sweep (15 confirmed findings fixed incl. the reserved-key strip
+  on restore — a forged store record can no longer overwrite model.cid); Eric's four
+  rulings (mapping-entry compile rejection with the fetcher-vocabulary nuance; suspend
+  outgoing edge; ttl long-math overflow guard; constant consolidation); and the big one —
+  **CompileGraph as the mandatory deployment gate** ([[compilegraph-mandatory-gate]],
+  ADR-0011 proposed, PR merge = ledger gate) with the two-lane validation architecture,
+  manifest-carried `location`, executor streamline, and `GraphModelValidator` reused by
+  the playground `run` pre-run check. Docs caught up (ten-skill at-a-glance tables,
+  deployment recipe, CHANGELOG migration note; `model.run` also joined the reserved
+  flow-metadata family — CompileFlows + runtime guard reject overwrites). Engine 88 /
+  app 16 / reactor green. Remaining: **P5 Rust lock-step arc** — mirrors engine core + compile
+  checks + store crate (Redis crate choice = Rust session) + tutorial fixture verbatim +
+  the log-context $cid and span-lineage presentation changes + the FINAL surface (no
+  `missing`, with `model.run`, mandatory gate + compiled-or-404 + manifest location,
+  validator modularization + pre-run check, walker atomicity + restore-strip fixes).)
+  **Graph suspend/resume: workflow suspension for the Active Knowledge Graph.** A graph run
+  persists model + suspension node at a human checkpoint via `skill=graph.suspend`
+  (reserved ALIAS `suspend` — the root/end special-alias pattern, jump-by-name routing;
+  one per graph; alias⇔skill enforced; drawn edge required), completes as a short run
+  (default response `{"type":"suspended","cid":…}`), and resumes via `skill=graph.resume`
+  (same business cid; restores model + nodeSeen/skillRun, new `resume:<alias>` directive
+  jumps WITHOUT re-executing; not-found = normal first run → next; optional
+  `missing=<alias>`). Suspensibility of a skilled node = reserved property `suspend=true`
+  (types Suspend/Resume/Suspensible are visual convention — skill defines behavior).
+  Store contract: put {cid,node,ttl,model,seen,run} / get {cid}, synchronous ack,
+  consume-on-retrieve (Redis GETDEL); ttl = getDurationInSeconds format. Redis module =
+  imported by the playground example app, NEVER the engine (both repos); engine tests use
+  a temp-file mock store at /tmp/suspend-resume. Constraints (documented): suspension
+  point must be the sole active branch (no suspend between fan-out and join);
+  `<node>.result` scratch does not survive — model is the workflow's durable memory;
+  cid = resume capability (auth on resume endpoints); cid does not cross graph.extension.
+  Full plan (file:line anchors, 5-phase):
+  draft-design-specs/graph-suspend-resume-implementation-plan.md (gitignored). Phases:
+  P1 engine core → P2 CompileGraph/Playground → P3 extensions/minigraph-state-redis +
+  contract page → P4 tutorial + e2e + docs + ADR proposal → P5 Rust lock-step arc
+  (supersedes its "session persistence out-of-scope" line). Blueprint thread + ADR
+  proposed, human-gated, NOT yet ratified. → would serve `vision-mercury-composable`
+  <!-- id: thread-graph-suspend-resume | created: 2026-07-28 | last_used: 2026-07-30 | uses: 6 | tier: active | origin: 2026-07-29-003528 -->
+
+- [x] (feature in flight — 2026-07-26; CLOSED 2026-07-26 — BOTH PRs MERGED same day:
+  Java [PR #236](https://github.com/Accenture/mercury-composable/pull/236) squash
+  `6ed481e1`, CI 6m51s; Rust PR #183 — the shared family key
+  `worker.instances.actuator.services` is now live on both engines. Rust v4.10.6 RELEASED
+  same day on the back of the merged arc — tag on merge `9732799e`, published; Eric
+  confirmed the pretty-print parity also improved the MiniGraph /api/graph output, live
+  proof of the single-render-path design.) **Ops-tunable worker instances, both engines
+  (Eric's /info/routes review round).** Context: the Rust typed-AsyncHttpRequest arc shipped
+  `/info/routes` (Rust branch `feature/typed-async-http-request`, unpushed), Eric reviewed
+  the live output and ruled: actuators → 5 instances, Rust demo `http.request.filter` → 20,
+  `event.api.auth` → 30 (real-world = OAuth2 bearer-token verification, I/O-bound), and the
+  ops-tunability principle: **declared counts are rules of thumb; operations teams tune in
+  QA/Perf via config before promoting to Production.** Java commit `6f0f03df` on
+  `feature/ops-tunable-instances` (NOT pushed): ActuatorServices 30 → 5 + NEW
+  `worker.instances.actuator.services` (one knob, 7 aliases); lambda-example event.api.auth
+  10 → 30 + `worker.instances.event.api.auth`; **doc bug fixed** — configuration-reference
+  claimed `worker.instances.<route>` overrides ANY route, but code (AppStarter.
+  getInstancesFromEnv + Platform.register) only honors it where `@PreLoad` declares
+  `envInstances` (any-route override = `yaml.preload.override`); added missing
+  `worker.instances.http.flow.adapter` section. Proof: platform-core 424 green WITH the
+  actuator key active (=8) + `actuatorFamilySharesOneEnvInstanceKey`; lambda-example 14.
+  **Cross-engine key parity decision: the Rust port's five per-endpoint actuator services
+  share the SAME key name `worker.instances.actuator.services`** (its actuator.services
+  route is unported; one runbook line tunes both engines). Rust half in flight in the agent
+  session (same branch/commit as the typed-request arc). Close when both PRs merge.
+  <!-- id: thread-ops-tunable-instances | created: 2026-07-26 | last_used: 2026-07-27 | uses: 1 | tier: archive-candidate | origin: 2026-07-27-005415 -->
+
+- [x] (feature in flight — 2026-07-25; ARC COMPLETE 2026-07-26 — P1 AND P2 merged both
+  repos) **Annotation → macro consistency arc (Eric's initiative; design RATIFIED — see
+  session 2026-07-25-235904 + the full spec at
+  draft-design-specs/annotation-macro-interop-design.md).** **P2 MERGED: Java PR #235
+  (squash `84c4957f`) + Rust PR #182 — delivering D4 (yaml.preload.override ported with
+  Java's exact merge/application semantics, 7-scenario suite) and D5 (the Registration
+  Metadata Contract: docs/guides/registration-metadata-contract.md + ADR-0009/ADR-0008
+  pair + golden vectors registration-vectors/{core,plugin,feature}.json shared VERBATIM +
+  one conformance suite per kind in both engines — see [[registration-metadata-contract]]).
+  The P2 round also carried: the Rust invariant re-verification (all five confirmed, code
+  drifts fixed, cadence reset), the AI-companion-test.md move to docs/test-reports
+  (published in nav), and Eric's string-semantics ruling (Unicode scalar values in all
+  ports; Java's UTF-16 = documented JVM legacy, bounded to supplementary-plane chars —
+  the F20 UTF-16 retrofit REVERTED in Rust with emoji+CJK evidence; anti-re-retrofit
+  guard recorded). Ratified dispositions: D3b (plugin gating) + D6 (executionHint)
+  deferred by design; tests/ui fixtures = test resources, no license headers (Eric,
+  2026-07-26). The full ratified scope is DELIVERED; future ports (Python/Node) start
+  from the contract page + vectors. No release scheduled — rides the next patch.** Goals: (1) Rust macro surface
+  reads like the Java annotation surface (decoupled; runtime classpath scan vs link-time
+  inventory is mechanics, not style); (2) the Rust port becomes the best-practice template
+  for future Python/Node ports. Verified ground truth: Java dogfoods its extension points
+  (47 @SimplePlugin built-ins, 2 @FetchFeature built-ins) while Rust hard-codes all of them
+  with zero production macro usage; #[fetch_feature] can't accept optional_service; conflict
+  semantics diverge AND Java itself is inconsistent (Platform.register javadoc claims
+  throws-on-duplicate but warn+reloads; PlaygroundLoader replaces silently). Ratified:
+  D1 convert Rust built-ins to declarative macros (explicit names where camelCase
+  derivation mismatches/keyword-collides; exact Java error-message parity); D2 ONE conflict
+  policy both engines (explicit register() > declarative; duplicate = WARN both sources +
+  last-wins; Java lock-step javadoc/log fixes); D3a fetch_feature + stacked
+  #[optional_service] (Java parity); D3b DEFERRED with Eric's principle: **plugins are
+  Event Script capabilities (flow vocabulary) — never conditionally on/off**; D4 (P2) port
+  yaml.preload.override to Rust; D5 (P2) registration-metadata contract spec page (real
+  schema; golden-JSON conformance per the wire-format precedent) + ADR pair; D6 DEFERRED
+  executionHint:blocking. Kafka annotations (@CloudConnector/@CloudService) ride the future
+  minimalist-kafka/sync-over-async port. Bonus fixes: two stale Rust docs (syntax.md
+  single-route claim; api-overview public/private claim). Branches:
+  feature/annotation-macro-consistency both repos (Java = javadoc+WARN lock-step; Rust =
+  the refinement round, delegated). **P1 MERGED 2026-07-25 (Java PR #234 squash
+  `265f295d`, CI 6m37s; Rust PR #181 merge, CI 2m26s incl. the first trybuild run —
+  .stderr files matched CI's stable toolchain first try).** Landed beyond the original
+  ratification (three mid-round refinements by Eric): positional #[simple_plugin("name")]
+  grammar (46 built-ins flipped; name= alias kept), order-insensitive marker stacking
+  (#[zero_tracing]/#[event_interceptor] as real proc-macros via the optional_service
+  self-reattachment pattern — "Java does not require stack order"), and the trybuild
+  compile-fail guards upgraded from P2 into the round (11 fixtures, 3 tests/ui suites in
+  the runtime crates; Rust workspace 265 tests). **Remaining = P2: D4 port
+  yaml.preload.override to Rust; D5 registration-metadata contract spec page (real
+  schema; golden-JSON conformance per the wire-format precedent) + ADR pair
+  (Java ADR-0009 / Rust ADR-0008).** No release scheduled yet — rides a future patch.
+  <!-- id: thread-annotation-macro-consistency | created: 2026-07-25 | last_used: 2026-07-27 | uses: 2 | tier: archive-candidate | origin: 2026-07-25-235904 -->
+
+- [x] (field support — 2026-07-25; CLOSED 2026-07-26 — **field rescan of v4.10.6 PASSED
+  the Sonar quality gate with a perfect Overall-Code score**: 0 vulnerabilities / 0 bugs /
+  0 code smells / 0 hotspots, coverage 80.5% ≥ the 60% requirement — Eric shared the field
+  dashboard 2026-07-26; arc complete: rejection → fix #231 → release v4.10.6 #232 → clean
+  rescan, the [[thread-sonar-4-9-1-field-rejection]] shape) **v4.10.4 failed
+  the field Sonar quality gate — 5 findings, fix reviewed + verified, MERGED as
+  [PR #231](https://github.com/Accenture/mercury-composable/pull/231) (merge commit
+  `c7d05d83`), then released as
+  [v4.10.6](https://github.com/Accenture/mercury-composable/releases/tag/v4.10.6) via
+  [PR #232](https://github.com/Accenture/mercury-composable/pull/232) (chore/release,
+  merge commit `2a940250`, tag pushed on that commit, CI green both PRs).** GitHub
+  Copilot authored the fix (commit `ac36ec4f`); Claude Code independently reviewed all 5
+  diffs line-by-line, verified, prepared the release (32-pom + CLAUDE.md/GEMINI.md/
+  memory/instructions.md version sweep, CHANGELOG entry following the v4.9.2
+  pure-Sonar-remediation precedent), and drafted the GitHub release notes; Eric gated
+  every PR-open/merge/tag/publish step. Findings: 2× S125 (commented-out code — both were
+  prose comments ending in a stray semicolon, which Sonar's heuristic mistakes for
+  commented-out code, in `HttpRouter.java` and `KafkaFlowConsumer.java`) + 3× S3776
+  (Cognitive Complexity >15 in `InboxBase.recordTrace`, `AsyncHttpResponse.handleEvent`,
+  `AsyncHttpClient.updateHttpHeaders` — fixed via helper-method extraction / guard-clause
+  early returns, confirmed behavior-preserving). **Verification:** full reactor
+  `mvn clean install` (29 modules) BUILD SUCCESS on both the fix and the bumped version;
+  live Java-to-Java Event-over-HTTP interop drive (composable-example ⇄ lambda-example,
+  both declarative + programmatic patterns) as a targeted regression test of the three
+  refactored trace/cid-propagation classes — 17 span records, zero duplicates, zero
+  dangling `parent_span_id`s, correct cross-process span parenting in both patterns
+  (programmatic pattern's non-adoption of a foreign span confirmed consistent with the I2
+  fix behavior in [[thread-event-envelope-interop]]). **Remaining:** close this thread
+  when the field team confirms the rescan of v4.10.6 passes the gate (precedent:
+  [[thread-sonar-4-9-1-field-rejection]], which followed the identical shape).
+  <!-- id: thread-sonar-4-10-4-field-rejection | created: 2026-07-25 | last_used: 2026-07-27 | uses: 2 | tier: archive-candidate | origin: 2026-07-25-005125 -->
+
+- [x] (release in flight — 2026-07-24; CLOSED same day) **v4.10.5 security patch SHIPPED
+  AND PUBLISHED in lock-step (both repos) — react-router CVE remediation.** Dependabot #16
+  on the Rust repo (react-router 7.18.1 RSC Mode CSRF Bypass, follow-up to CVE-2026-22030,
+  patched 8.3.0; the Java twin webapp carried the identical exposure) — Eric CONFIRMED the
+  alert closed on release. Remediation: react-router-dom is RETIRED upstream at 7.18.1
+  (pins the vulnerable react-router exactly — why dependabot could not auto-fix); v8
+  consolidated into the single react-router package, so both webapps now depend on
+  `react-router ^8.3.0` directly with import specifiers updated in 4 files (six stable
+  declarative exports; React 19.2.8 already satisfies the >= 19.2.7 peer). Validation both
+  webapps: npm audit 0, lockfile registry+integrity clean, 124 tests, resources/public
+  rebuilt via npm run release (Eric's instruction). Java: PR #230, tag `v4.10.5` on squash
+  commit `4c82eae0` (verified before tagging), CI 7m14s + reactor 5:33. Rust: PR #180,
+  tag on merge `5ae307c2`, CI green (260 tests). Operational notes: a transient
+  GitHub web-UI 500 delayed PR creation (API was healthy; status page lagged); EMU
+  accounts CANNOT create PRs via API either (GraphQL + REST both 403) — web UI is the only
+  PR path. Sixth lock-step release of the 4.10 arc.
+  <!-- id: thread-release-4-10-5 | created: 2026-07-24 | last_used: 2026-07-24 | uses: 1 | tier: archive-candidate | origin: 2026-07-24-154543 -->
+
+- [x] (release in flight — 2026-07-24; CLOSED same day) **v4.10.4 SHIPPED AND PUBLISHED in
+  lock-step (both repos) — standards-first traceparent carrier + interop header hygiene.**
+  Java: PR #229, tag `v4.10.4` on squash commit `0125c17b` (verified before tagging), CI
+  7m29s green + local reactor 5:06 on the release version. Rust: PR #179, tag on merge
+  `03424582`, CI green (260 tests). Both PRs' content merged earlier as Java #228 (squash
+  `fcd4fbc1`: report + envelope scrub + resolution + standards position + precedence flip)
+  and Rust #178. Both releases validated by the ce_traceparent four-way drive — all eight
+  echoes identical. PR-branch lesson retained: Eric created the fix PRs from the stacked
+  report branches while the fix commits sat on a second branch — resolved by
+  fast-forwarding the PR branches (strict descendants); VERIFY which branch a PR points at
+  before assuming pushed commits appear in it. Fifth lock-step release of the 4.10 arc:
+  4.10.0 interop → 4.10.1 presentation parity → 4.10.2 boundary demarcation → 4.10.3 field
+  roll-up → 4.10.4 standards-first traceparent + hygiene.
+  <!-- id: thread-release-4-10-4 | created: 2026-07-24 | last_used: 2026-07-24 | uses: 1 | tier: archive-candidate | origin: 2026-07-24-154543 -->
+
+- [x] (feature in flight — 2026-07-24; CLOSED same day — RELEASED in v4.10.4) **Configurable traceparent header name (field request).**
+  Field wants `http.traceparent.header` / `kafka.traceparent.header` /
+  `secondary.kafka.traceparent.header` (secondary → primary fallback) alongside the existing
+  trace-id/correlation-id families. Assessment AGREED (design-clean, unlike the rejected
+  `legacy.trace.id` conflation flag: renames the CARRIER, not the semantics — full W3C context
+  crosses a header-stripping gateway, so cross-app span parenting survives; fixes the known
+  limitation in [[thread-field-trace-propagation-4-6-3]]). Eric ratified the 3 design points
+  2026-07-24: (2) inbound = configured name wins when well-formed (sidecar-injected standard
+  traceparent cannot override the peer's context), standard header as fallback; (3) outbound =
+  stamp BOTH names (the "alongside" precedent); (4) per-entry overrides included
+  (rest.yaml + kafka-flow-adapter.yaml `traceparent.header`) for a symmetric surface. Default
+  stays `traceparent`; docs carry the standards-deviation warning (renamed carrier invisible to
+  OTel/Istio/APM). Java reference IMPLEMENTED on `feature/configurable-traceparent-header`:
+  platform-core (HttpRouter class-load static + per-entry, dual stamp in AsyncHttpClient +
+  EventEmitter setTraceHeaders helper), minimalist-kafka (notification dual stamp +
+  isPropagatableHeader exclusion, consumer custom-first parse, per-binding key), twin-kafka
+  (secondaryOrGlobal). Tests: platform-core 420 green (5 new; suite runs WITH the global custom
+  name active = additive proof), minimalist-kafka 101 (5 new incl. wire-level dual-stamp e2e),
+  twin-kafka 9 (wire-level secondary→primary fallback assert). Docs: config-reference 3 new
+  keys, observability table + "renamed traceparent beats conflation" note, rest-grammar +
+  rest-automation.json + ai-agent-guide, minimalist/twin-kafka guides, reserved-names,
+  CHANGELOG Unreleased. **BOTH PRs MERGED 2026-07-24 (Java #227 merge `47e948ef`, CI 7m40s;
+  Rust #177 merge `e99013cb`, 257 tests) and the pre-release ce_traceparent interop drive
+  PASSED in full** (gateway simulation: W3C value supplied ONLY under the custom name; edge
+  adoption + cross-language span parenting both directions; wire-level dual stamp both
+  engines; report round appended to docs/test-reports/event-over-http-interop.md in both
+  repos). **Findings queued for a follow-up hygiene round (pre-existing, not the feature):**
+  both programmatic demo tasks transport their injected my_* view (accidental-copy
+  anti-pattern, request side); the engines sanitize different subsets at the /api/event door
+  (Java delivers my_correlation_id / strips route+trace keys, Rust the inverse + strips
+  x-event-api); Rust wire nits (duplicate trace headers, x-correlation-id on /api/event,
+  missing traceparent-name startup log). **Hygiene round COMPLETE 2026-07-24 (Eric directed;
+  ships in v4.10.4):** both engines scrub the 5 engine keys from the delivered ENVELOPE view
+  (non-interceptor; legacy my_correlation_id honored-then-scrubbed; interceptors keep raw
+  fidelity — the Rust fix also RESTORED interceptor fidelity its partial scrub violated);
+  both demos forward business headers only; Rust wire aligned to the Java reference (single
+  stamps, no x-correlation-id on the event-over-HTTP leg, accept + x-small-payload-as-bytes,
+  startup header-name log lines); x-ttl ingress alignment (Java represents the route timeout
+  as the request's x-ttl header, caller-sent wins — AsyncHttpRequest.setTimeoutSeconds; Rust
+  ingress now mirrors). **Final matrix: ALL EIGHT ECHOES IDENTICAL after normalization** —
+  report Resolution subsection in both repos. Java branch fix/interop-header-hygiene
+  (stacked on the report branch); Rust same-name branch (33fba853 + 7e22af9a, 260 tests).
+  **Standards position stated in all docs (Eric's ruling): W3C/OTel traceparent is the
+  position; traceparent.header = backward compat with legacy systems ONLY; departure
+  discouraged. Final ruling (SUPERSEDES design point 2): inbound precedence = STANDARD
+  traceparent always wins, custom name read only when standard absent (presence of the
+  standard means the legacy system already upgraded; proprietary value is residual). Both
+  engines flipped in lock-step, regressions inverted, report carries the refinement note.**
+  **RELEASED 2026-07-24 in v4.10.4 both repos ([[thread-release-4-10-4]]) — the full arc
+  closed: field request → design ruling → lock-step implementation → ce_traceparent live
+  interop → hygiene round → standards position → release.**
+  <!-- id: thread-traceparent-header-config | created: 2026-07-24 | last_used: 2026-07-24 | uses: 1 | tier: archive-candidate | origin: 2026-07-24-154543 -->
+
+- [x] (release in flight — 2026-07-23; CLOSED same day) **v4.10.3 SHIPPED AND PUBLISHED in
+  lock-step (both repos) — field-deployment roll-up.** Releases are immutable (Eric), so the
+  post-4.10.2 fixes shipped as a new patch for the field pipeline: demo clean-echo
+  (#225/Rust #175) + npm webapp refresh (#224/Rust #174); no engine behavior changes — the
+  release consolidates the whole 4.10 line (wire format, presentation parity, metadata
+  contract, reserved inbox, collection plugins) for field quality gates. Java: PR #226, tag
+  `v4.10.3` on squash commit `bd7e909d` (verified before tagging — the 4.10.2 tag-race
+  lesson), CI 7m24s green + clean local reactor 4:49 (first gate run failed only from Eric's
+  concurrent build on the same tree). Rust: PR #176, tag on merge `b3804a67`, CI green
+  (252 tests). Fourth lock-step release of the arc: 4.10.0 interop → 4.10.1 presentation
+  parity → 4.10.2 boundary demarcation → 4.10.3 field roll-up.
+  <!-- id: thread-release-4-10-3 | created: 2026-07-23 | last_used: 2026-07-24 | uses: 1 | tier: archive-candidate | origin: 2026-07-24-023859 -->
+
+- [x] (in flight — 2026-07-23; COMPLETE same day, released in v4.10.2) **Metadata
+  injection/sanitization hardening (Eric's 3rd interop round).** Design ruling: function inputs = headers/body/instance; headers = envelope-header
+  COPY + metadata INJECTED at entry, SANITIZED at exit; metadata NEVER transported in the event.
+  Java reference DONE on `feature/metadata-injection-hardening` (1 commit, NOT pushed): business
+  cid → engine tag `my_cid` (EventEmitter.BUSINESS_CID_TAG; tags wire field, no spec change;
+  three stamping sites converted), worker entry injection (4 my_* keys + legacy-header compat +
+  x-event-api strip), symmetric exit filter (copyResponseHeaders + x-event-api), HTTP response
+  X-Correlation-Id echo (AsyncContextHolder + AsyncHttpResponse; function-set header wins).
+  Full reactor green; platform-core 415 (4 new regressions); live verification passed (cid echo
+  inbound+generated; function view: 4 injected my_*, business cid intact, no x-event-api).
+  Tracing signature UNCHANGED (all four directions re-verified against the reference before the
+  fix). **Rust mirror COMPLETE (`794fb287`, 249 tests green) and four-way re-verification
+  PASSED with the extended invariants** — identical injected my_* key set on both callees,
+  end-to-end cid identity across the language boundary (response header == callee-injected
+  my_correlation_id), x-event-api absent everywhere, span signature empty-diff in all four
+  combinations. **+ Second item (Eric): Rust RPC-reply design gap — the "inbox." prefix
+  pseudo-routes reserve the whole inbox.* namespace (collides with workflow-app route names
+  like inbox.approval); Rust session aligning to Java's single reserved private route
+  `temporary.inbox` (@ZeroTracing @EventInterceptor, 500 instances, cid-keyed registry,
+  composite cid-seq split) as a 2nd commit on the same branch; CRITICAL sub-item: the Rust
+  one-record-per-span suppression gate keyed off the "inbox." prefix must re-key (prefer the
+  rpc tag, Java's real mechanism).** **Rust 2nd commit DONE (`698de3c4`, 250 tests; gate
+  re-keyed to the rpc TAG; essential sequencing + @origin never-emit per Eric's hints; found a
+  genuine AsyncHttpClientService global-platform bug) and the INTEROP RE-TEST PASSED in full**
+  (cross-language both directions: functionality, auth, cid echo + generated-identity, my_*
+  parity, x-event-api-free, signature empty-diff ×2×2 — the inbox refactor is observably
+  invisible, validating Eric's robustness hypothesis). **BOTH PRs MERGED 2026-07-23: Java #221
+  (merge `a25d95d5`) + Rust #171 (merge `f86fbec2`), CI green both.** Remaining: the v4.10.2
+  lock-step releases ([[thread-release-4-10-2]]). Relates [[conv-telemetry-presentation-parity]].
+  <!-- id: thread-metadata-injection-hardening | created: 2026-07-23 | last_used: 2026-07-24 | uses: 1 | tier: archive-candidate | origin: 2026-07-23-211728 -->
+
+- [x] (design — 2026-07-21; COMPLETED 2026-07-22 with the v4.10.0 release) **Common event
+  envelope wire format for cross-language interop (Event over HTTP with the Rust port).** Design DRAFTED at
+  `draft-design-specs/event-envelope-interop-design.md` — standard envelope = MsgPack map
+  with descriptive string keys (the existing `toMap()` form promoted to a wire contract);
+  compact 1-char keys and standard ≥2-char keys are disjoint → decoders sniff both, no
+  negotiation; encode: requester chooses (config + per-call header), responder mirrors;
+  Java `exceptionBytes` (ObjectOutputStream) excluded — portable error = status + message
+  + stack text. Rust port is the interop testbed but is READ-ONLY from this repo's
+  sessions (another session owns Rust edits). Includes draft ADR text. **Design REVIEWED
+  by Eric 2026-07-21: default = `standard` (Event over HTTP is transport, not storage —
+  no serialized data outlives the exchange; upgrade both sides together), `compact` kept
+  as explicit fallback for slow-to-upgrade installations (FIFO-vs-BDB precedent);
+  config `event.over.http.format` + per-request `x-event-format` header CONFIRMED.**
+  **API shape AGREED 2026-07-21:** `enum Format {COMPACT, STANDARD}`; `toMap(Format)` /
+  `toBytes(Format)`; no-arg `toMap()`=STANDARD, no-arg `toBytes()`=COMPACT (both preserve
+  today's behavior — EventEmitter's `of(event.toMap())` clone path depends on the
+  standard no-arg); `load()` sniffs. Outbound format = transport policy (groundwork for
+  Redis/S3 event-to-bytes transports). Mesh investigated: compact on every hop today,
+  Java-only fleet, stays out of v1 scope (MultipartPayload segmentation is a second
+  proprietary layer). **Phase 1 IMPLEMENTED 2026-07-21** on branch
+  `feature/event-envelope-standard-format`: Format enum API, sniffing load +
+  getWireFormat(), EventEmitter format resolution at both encode points, EventApiService
+  response mirroring, 8 new tests incl. golden vectors
+  (`system/platform-core/src/test/resources/envelope-vectors/vectors.json` — share with
+  the Rust session), spec page `docs/guides/event-envelope-wire-format.md`. Spec
+  adjustment from implementation: body is when-set on encode (MsgPack.packMap skips
+  nulls); Rust decoder needs a serde default on `body`. **Phase 1 MERGED 2026-07-21
+  (PR #212, merge commit `2cf2ebdf`; CI green: 951 reactor tests + docs verify; spec page
+  live on the docs site).** Hand-off note
+  for the Rust session: `/tmp/event-envelope-rust-handoff.md` (contract summary, compact
+  decision + flag table, /api/event semantics, vector procedure, interop test plan) —
+  Eric will ask this repo's session to REVIEW the Rust implementation for consistency
+  afterward. **Phase 2 IMPLEMENTED in the Rust session (mercury increments 59-61, PRs
+  #163-#165) and REVIEWED for consistency 2026-07-22: high fidelity, no blockers** —
+  vectors byte-identical, envelope/service/client semantics match (see session
+  2026-07-22-004243 for the asymmetry list). Review follow-up: new additive golden vector
+  `standard-trace-context` (span_id coverage, their finding) on branch
+  `test/fetcher-cache-key-guard`; Rust re-syncs vectors.json + bumps its count assertion
+  (note: `/tmp/event-envelope-vectors-update.md`). **LIVE BIDIRECTIONAL INTEROP TEST
+  PASSED 2026-07-22** (report `/tmp/event-over-http-interop-test-report.md`; session
+  2026-07-22-015924): Java→Rust 7/7, Rust→Java 6/7 (last case blocked only by the Rust
+  client's mirror of defect D1 — flagged to the Rust repo), trace continuity both ways.
+  Drive found+fixed a REAL pre-existing Java bug (D1: getTimeoutSeconds floor-division →
+  1s HTTP read timeout; fixed on branch `fix/http-client-response-timeout` with
+  regression test). **UPDATE same day: Rust→Java also 7/7 — D2 fixed (div_ceil + grace,
+  regression test) and the blocked case re-verified live; D3 (example echo binary drop)
+  fixed; declarative `yaml.event.over.http` routing implemented for parity (increment 62,
+  live zero-code cross-language proof verified in Java telemetry). ALL MERGED 2026-07-22:
+  Java D1 fix = PR #214 (merge `2b5504a0`); Rust D2+D3+test-service+declarative = mercury
+  PR #166 (merge `e36e5dc5`, commits f62a69bf/230ee55b/258f3578). The "redundant D2 chip
+  session" turned out not to exist (session list + transcript search clean); repo memory
+  protocol protects against late arrivals anyway. Interop test processes stopped.**
+  **UPDATE 2026-07-22 (evening): the full release-gate cycle completed** — Java PR #215
+  (demo pair, default-on log context, RPC span lineage + the spanIdFromResponder
+  refinement) and Rust mercury PR #167 (parity batch + I1/I2/I3 telemetry fixes) BOTH
+  merged; live bidirectional pattern drives (programmatic + declarative) PASSED in full
+  with span-accurate telemetry; permanent record at
+  `docs/test-reports/event-over-http-interop.md`. **v4.10.0 SHIPPED AND PUBLISHED 2026-07-22
+  ([[thread-release-4-10-0]]) — this thread is COMPLETE: design → implementation → parity →
+  live interop → release, both engines in lock-step.** → serves `vision-mercury-composable`
+  (polyglot deployment)
+  <!-- id: thread-event-envelope-interop | created: 2026-07-21 | last_used: 2026-07-25 | uses: 7 | tier: archive-candidate | origin: 2026-07-21-215951 -->
+
+- [x] (field support — 2026-07-21; CLOSED 2026-07-26 by the review — close condition
+  subsumed: the field's Sonar gate passed with a perfect Overall-Code score on v4.10.6,
+  which contains the entire 4.9.2 remediation, so the pending "field rescan passes" is
+  satisfied — see [[thread-sonar-4-10-4-field-rejection]])
+  **v4.9.1 REJECTED by the field Sonar quality gate; remediation
+  MERGED (PR #210, `7110561c`), v4.9.2 release in flight for the field rescan.** 19 issues
+  (8 HIGH: S3776 complexity ×4 + S1192 literals ×4; 11 MEDIUM: S5778 ×5, S125 ×2, S1168 ×2,
+  S5961, S6126), all introduced by the 4.9.0/4.9.1 minigraph companion/discovery code (field's
+  prior scan was pre-4.9). All 19 fixed via helper extraction, constants, test splits,
+  prose-comment rewording, and the `deployedModel` empty-map contract — see session
+  2026-07-21-173614 for the per-issue map + Eric's IDE review round. Behavior-preserving; full
+  reactor green; Eric's manual HTTP-404 regression passed (dry-run + deployed execution).
+  **v4.9.2 SHIPPED 2026-07-21** (tag on merge commit `b574f41e`, PR #211; 943 reactor tests
+  green + Eric's manual HTTP-404 regression). Close when the field rescan passes. Durable
+  lesson recorded: extract-as-you-go when touching methods near the S3776/S5961 thresholds.
+  <!-- id: thread-sonar-4-9-1-field-rejection | created: 2026-07-21 | last_used: 2026-07-27 | uses: 4 | tier: archive-candidate | origin: 2026-07-21-173614 -->
+
+
+
+- [ ] (field support — 2026-07-13; ROOT CAUSE FOUND via Eric's devops screen share) **Trace-propagation
+  report: the internal API gateway strips `traceparent` AND `X-Trace-Id` (neither on its allow-list);
+  only `X-Correlation-Id` passes.** 4.4.11 "worked" because `trace.http.header=X-Correlation-Id, X-Trace-Id`
+  made the trace ride the allow-listed first entry. Correction to the field's initial write-up: 4.6.3+
+  DOES emit X-Trace-Id alongside traceparent on every traced outbound call (verified in code + wire-level
+  tests on v4.7.1) — the gateway eats both. Fix options: (a) config-only on 4.8.3:
+  `http.trace.id.header=X-Correlation-Id` both apps (caveat: cid wins the shared slot when ids diverge);
+  (b) a proposed `legacy.trace.id` flag — **REJECTED by Eric (2026-07-13): no code change; re-mixing the
+  business correlation-id with the trace id makes things worse — the goal is proper traceId/spanId/
+  parentSpanId propagation**; (c) gateway allow-list change (add `traceparent` + `X-Trace-Id`
+  pass-through) = **THE fix — Eric is taking it to the infra team**.**Original checklist below retained.**
+  Trace-propagation report on 4.6.3: confirm the field config fix. Diagnosis + support checklist in
+  [[field-trace-propagation-4-6-3-diagnosis]]; the two questions back to the team: is `tracing: true` set
+  on every rest.yaml endpoint involved, and is the app-to-app call made through `async.http.request` (vs
+  a custom/Spring HTTP client that must forward `traceparent` itself)? Regression test + observability
+  impedance-matching docs MERGED (PR #169); ScheduleAdminTest race fix MERGED (PR #170 — file existence
+  ≠ readiness when writes are truncate-then-write; poll the consuming API for settled state). The team
+  trials v4.7.1 for the trace behavior while v4.8.3 is prepared. Also answered (2026-07-13): setting
+  `http.trace.id.header` = `http.correlation.id.header` = `X-Correlation-Id` (legacy conflation) is safe
+  when the edge always supplies the header — one value feeds both ids end-to-end. **UPDATE 2026-07-14:
+  the absent-header divergence was FIXED** (`fix/conflated-header-id-unification`) — when the resolved
+  trace/cid header names collide and the shared header is absent, both ingress paths (HTTP + Kafka
+  adapter) now yield ONE id (trace authoritative, honors traceparent; cid adopts it). Divergence remains
+  by design only for DISTINCT names. **VALIDATED by Eric 2026-07-14 (merged as PR #179, in the post-#181
+  main)**: complete local build + live two-app hop with no header supplied → downstream saw traceparent
+  trace-id == x-correlation-id (one generated id). Supplied-header case also validated (abc123 fed both
+  ids across the hop). Demo pair for reproducing: composable-example (8100) -> lambda-example (8085)
+  via /api/cross/app/tracing; traceId confirmed in BOTH apps' trace logs for both cases. Support nuance: with conflation, the outbound trace id rides the CONFIGURED header
+  name (X-Correlation-Id), and traceparent is stamped only when the id is W3C-shaped (32-hex) — a short
+  business id travels on the shared header alone, which is exactly why this works behind the
+  traceparent-stripping gateway. Telemetry confirmed spanId/parentSpanId chain correctly within each
+  app under the shared trace id; CROSS-app span parenting still needs traceparent (it carries the
+  caller's span id), so tooling stitches by trace id until the gateway passes traceparent — positive
+  case VERIFIED live too: with traceparent on the wire (generated 32-hex id), lambda-example's
+  hello.world span parented directly onto the traceparent's span id across the HTTP hop. Field runs this conflation short-term; gateway team has been ASKED (2026-07-14) to
+  allow-list traceparent + X-Trace-Id at the gateway/Istio — Eric updates after the devops team
+  tests in the cloud dev environment.
+  <!-- id: thread-field-trace-propagation-4-6-3 | created: 2026-07-13 | last_used: 2026-07-24 | uses: 7 | tier: working | origin: 2026-07-13-142021 -->
 
 - [ ] (P0–P5 code-complete — Claude Code, 2026-07-05, branch `feature/elastic-queue-file-fifo`; remaining = field canary → P4 retire-BDB) **Replace
   ElasticQueue's Berkeley DB spill tier with a portable file-backed segmented FIFO.** Full detail + rationale
@@ -292,7 +863,7 @@
   checks?), and should it reuse or diverge from `event-script-engine`'s own `validInput`/`validOutput`
   validation (already confirmed to diverge in places — minigraph's per-skill namespace rules, e.g. fetcher
   input/output/dictionary, don't match event-script's).
-  <!-- id: thread-compilegraph-syntax-validation | created: 2026-07-02 | last_used: 2026-07-02 | uses: 1 | tier: working | origin: 2026-07-02-004606 -->
+  <!-- id: thread-compilegraph-syntax-validation | created: 2026-07-02 | last_used: 2026-07-29 | uses: 4 | tier: working | origin: 2026-07-02-004606 -->
 
 - [ ] (planned — backlog, no ETA, no CVE driver) **Upgrade `kafka.version` (4.2.0 → 4.3.x) across the 24
   pom.xml files that pin it.** Deliberately deferred alongside the `confluent.version` 8.2.0→8.3.0 bump — see
@@ -304,14 +875,6 @@
   `minimalist-kafka` — a materially larger test surface than a serializer-library bump.
   <!-- id: thread-kafka-client-version-upgrade | created: 2026-07-01 | last_used: 2026-07-01 | uses: 1 | tier: working | origin: 2026-07-01-230246 -->
 
-- [ ] (implemented, **uncommitted** — Claude Code, 2026-07-02) **minimalist-kafka: Confluent CSFLE wired.**
-  Full detail in the Key Decision [[kafka-csfle-delegation]] and the 2026-07-02-020429 session log. Branch
-  `feature/kafka-csfle-field-encryption`, working tree dirty (5 modified + 2 new test files), **nothing
-  committed**. All tests green (5 new + full `minimalist-kafka` suite 54, coverage gate met). Design spec
-  `draft-design-specs/kafka_csfle_field_encryption_design.md` (v3.0, gitignored) fully in sync — §10/§11
-  record exactly what shipped. **Next action: Eric's code review, then commit + PR** (same flow as #128/#129).
-  → relates [[minimalist-kafka-schema-registry]], [[kafka-schemaid-from-subject-version]].
-  <!-- id: thread-csfle-field-encryption | created: 2026-07-01 | last_used: 2026-07-04 | uses: 3 | tier: working | origin: 2026-07-02-020429 -->
 - [ ] (planned — Eric, 2026-06-24) **Add Gradle build support** alongside the existing Maven reactor
   (Maven stays the current build tool; see `stack-build-maven`). Scope TBD — likely a parallel Gradle
   build for the multi-module project.
@@ -355,7 +918,7 @@
   - **Surface the machine-readable catalogs in `llms.txt`** (the DSL `*.json` files) as first-class entries, and add
     "build & test an app" + "author an extension" entries so an agent doesn't discover them only by reading prose.
   → serves `vision-mercury-composable`.
-  <!-- id: thread-docs-improvement-backlog | created: 2026-06-24 | last_used: 2026-06-24 | uses: 1 | tier: working -->
+  <!-- id: thread-docs-improvement-backlog | created: 2026-06-24 | last_used: 2026-07-20 | uses: 4 | tier: working -->
 - [ ] (next iteration — Eric, 2026-06-24; **design + implement**) **Cross-pod request-response via Redis
   Pub/Sub RPC + Kafka.** A distributed sync-over-async pattern (an advanced opt-in use case, cf.
   `kafka-mesh-opt-in`): `REST sync request-response → Composable service (POD-1) → Redis Pub/Sub RPC + Kafka
@@ -442,16 +1005,22 @@
   superseded, not the Copilot review.)
   <!-- id: thread-redis-kafka-rpc | created: 2026-06-24 | last_used: 2026-06-27 | uses: 6 | tier: working -->
 
-- [ ] **Re-verify invariants (still pending; re-prompted 2026-07-30 after another 77 sessions ≥
-  verify_invariants_every 40).** Raised by the 2026-06-29 review and retained as the single human gate
-  by the 2026-07-30 review. Confirm each never-decay fact still holds, or supersede any that don't
+- [x] (CLOSED 2026-07-27 — **ALL 15 CONFIRMED by Eric** in a one-by-one walkthrough with
+  fresh live-tree evidence per item: 5 stack facts, 3 architectural invariants, 6 core
+  conventions/gotchas, + the Vision. Several now carry stronger guarantees than when
+  written: monoResponseForwardsSpanId regression, golden registration vectors pinning
+  inputPojoClass, `"none"` default read live at ActuatorServices:109, and the Gson
+  Integer→Long gotcha proven by a live hit in the conformance round. Vision current-state
+  refreshed to v4.10.6 + Rust lock-step; target statement unchanged. Cadence reset.)
+  **Re-verify invariants (due — 50 sessions since the last check ≥ verify_invariants_every 40).** Raised by
+  the 2026-06-29 review (cadence). Confirm each never-decay fact still holds, or supersede any that don't
   (`DECAY.md` §9 — the review never auto-invalidates):
   core stack — `stack-language-java21`, `stack-build-maven`, `stack-integration-spring`,
   `stack-messaging-kafka`, `stack-ci-gha`; architectural invariants — `functions-decoupled-routes`,
   `typed-io-map-or-pojo`, `virtual-threads-rpc`; core gotchas/decisions — `trace-thread-keyed-mono-gotcha`,
   `instant-serialization`, `kafka-mesh-opt-in`, `event-script-over-code`, `conv-add-capability`,
   `conv-serialization-gotchas`; and the **Vision** (`memory/vision.md`). Check off when re-confirmed.
-  <!-- id: thread-reverify-invariants-2026q2 | created: 2026-06-29 | last_used: 2026-07-30 | uses: 2 | tier: working -->
+  <!-- id: thread-reverify-invariants-2026q2 | created: 2026-06-29 | last_used: 2026-07-30 | uses: 4 | tier: active -->
 
 ## User Preferences
 

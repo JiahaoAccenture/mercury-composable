@@ -75,8 +75,6 @@ public class TaskExecutor implements TypedLambdaFunction<EventEnvelope, Void> {
     private static final String OUTPUT_BODY = "output.body";
     private static final String OUTPUT_HEADER = "output.header";
     private static final String MODEL = "model";
-    // Read-only reserved header exposing the flow's correlation-id (model.cid) to every function task.
-    private static final String MY_CORRELATION_ID = "my_correlation_id";
     private static final String RESULT = "result";
     private static final String DATA_TYPE = "datatype";
     private static final String HEADER = "header";
@@ -966,9 +964,10 @@ public class TaskExecutor implements TypedLambdaFunction<EventEnvelope, Void> {
                                             .setBody(unwrapBodyIfWildcard(md))
                                             .setSpanId(parentSpanId);
             md.optionalHeaders.forEach(event::setHeader);
-            // expose the flow's business correlation-id (model.cid) as a read-only reserved header - stamped
-            // last so a mapped optional header named my_correlation_id cannot override the framework value
-            event.setHeader(MY_CORRELATION_ID, flowInstance.businessCorrelationId);
+            // carry the flow's business correlation-id (model.cid) on the engine-managed envelope tag -
+            // never as an envelope header - so the worker injects my_correlation_id at delivery and a
+            // mapped optional header cannot collide with the framework value
+            event.addTag(EventEmitter.BUSINESS_CID_TAG, flowInstance.businessCorrelationId);
             // execute task by sending event
             if (deferred > 0) {
                 po.sendLater(event, new Date(System.currentTimeMillis() + deferred));
@@ -1259,10 +1258,19 @@ public class TaskExecutor implements TypedLambdaFunction<EventEnvelope, Void> {
             while (start < text.length()) {
                 start = scanDynamicIndex(sb, text, source, isRhs, start);
             }
-            return sb.toString();
-        } else {
-            return text;
+            text = sb.toString();
         }
+        // A dynamic RHS (e.g. 'model.{model.pointer}') is resolved only at runtime, so it bypasses
+        // the flow compiler's reserved-key validation - re-check the resolved form here. A static
+        // statement passes through unchanged and was already validated at compile time.
+        if (isRhs && !text.equals(statement)) {
+            String reserved = CompileFlows.reservedModelKeyViolation(text);
+            if (reserved != null) {
+                throw new IllegalArgumentException("Cannot set RHS to the reserved state-machine key '" +
+                        reserved + "' - " + statement);
+            }
+        }
+        return text;
     }
 
     private void validateNumericIndex(StringBuilder sb, String text, String idx, boolean isRhs) {

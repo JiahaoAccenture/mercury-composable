@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.platformlambda</groupId>
     <artifactId>opentelemetry-forwarder</artifactId>
-    <version>4.7.0</version>
+    <version>4.10.6</version>
     <packaging>jar</packaging>
     <name>OpenTelemetry trace forwarder extension</name>
     <description>
@@ -22,8 +22,9 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <java.version>21</java.version>
-        <netty.version>4.2.15.Final</netty.version>
-        <jackson-2-bom.version>2.22.0</jackson-2-bom.version>
+        <netty.version>4.2.16.Final</netty.version>
+        <jackson-2-bom.version>2.22.1</jackson-2-bom.version>
+        <log4j2.version>2.26.1</log4j2.version>
         <otel.version>1.63.0</otel.version>
     </properties>
 
@@ -50,7 +51,7 @@
         <dependency>
             <groupId>org.platformlambda</groupId>
             <artifactId>platform-core</artifactId>
-            <version>4.7.0</version>
+            <version>4.10.6</version>
         </dependency>
 
         <dependency>
@@ -75,7 +76,7 @@
         <dependency>
             <groupId>org.platformlambda</groupId>
             <artifactId>event-script-engine</artifactId>
-            <version>4.7.0</version>
+            <version>4.10.6</version>
             <scope>test</scope>
         </dependency>
         <dependency>

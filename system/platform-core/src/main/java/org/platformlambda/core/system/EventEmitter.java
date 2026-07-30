@@ -23,6 +23,7 @@ import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.eventbus.EventBus;
 import org.platformlambda.automation.http.AsyncHttpClient;
+import org.platformlambda.automation.services.HttpRouter;
 import org.platformlambda.core.models.*;
 import org.platformlambda.core.services.TemporaryInbox;
 import org.platformlambda.core.util.AppConfigReader;
@@ -50,6 +51,10 @@ public class EventEmitter {
     public static final String CLOUD_CONNECTOR = "cloud.connector";
     public static final String CLOUD_SERVICES = "cloud.services";
     public static final String RPC = "rpc";
+    // Engine-managed envelope tag carrying the business correlation-id across touch points and
+    // Event-over-HTTP hops. Metadata is never transported as envelope headers - the worker injects
+    // the my_correlation_id key into the function's input header copy from this tag at delivery.
+    public static final String BUSINESS_CID_TAG = "my_cid";
     private static final String MISSING_ROUTING_PATH = "Missing routing path";
     private static final String MISSING_EVENT = "Missing outgoing event";
     private static final long ASYNC_EVENT_HTTP_TIMEOUT = 60 * 1000L; // assume 60 seconds
@@ -71,6 +76,10 @@ public class EventEmitter {
     private static final String X_TTL = "x-ttl";
     private static final String X_ASYNC = "x-async";
     private static final String X_TRACE_ID = "x-trace-id";
+    private static final String X_EVENT_FORMAT = "x-event-format";
+    private static final String EVENT_HTTP_FORMAT_PROPERTY = "event.over.http.format";
+    private static final String COMPACT_FORMAT = "compact";
+    private static final String STANDARD_FORMAT = "standard";
     private static final String ROUTE_SUBSTITUTION = "route.substitution";
     private static final String ROUTE_SUBSTITUTION_YAML = "yaml.route.substitution";
     private static final String ROUTE_SUBSTITUTION_FEATURE = "application.feature.route.substitution";
@@ -665,6 +674,36 @@ public class EventEmitter {
         return eventHttpTargets.get(slash == -1? route : route.substring(0, slash));
     }
 
+    /**
+     * Resolve the envelope serialization format for an outgoing Event-over-HTTP
+     * call. A per-call "x-event-format" header (including one declared per target
+     * in yaml.event.over.http) overrides the application default from the
+     * "event.over.http.format" property. The default is the language-neutral
+     * STANDARD format; "compact" selects the classic single-character-key format
+     * as a fallback for peers that have not upgraded yet.
+     */
+    private EventEnvelope.Format httpEventFormat(Map<String, String> headers) {
+        if (headers != null) {
+            for (Map.Entry<String, String> kv : headers.entrySet()) {
+                if (X_EVENT_FORMAT.equalsIgnoreCase(kv.getKey())) {
+                    return parseEventFormat(kv.getValue());
+                }
+            }
+        }
+        return parseEventFormat(AppConfigReader.getInstance()
+                .getProperty(EVENT_HTTP_FORMAT_PROPERTY, STANDARD_FORMAT));
+    }
+
+    private EventEnvelope.Format parseEventFormat(String value) {
+        if (COMPACT_FORMAT.equalsIgnoreCase(value)) {
+            return EventEnvelope.Format.COMPACT;
+        }
+        if (!STANDARD_FORMAT.equalsIgnoreCase(value)) {
+            log.warn("Unknown event envelope format '{}' - using {}", value, STANDARD_FORMAT);
+        }
+        return EventEnvelope.Format.STANDARD;
+    }
+
     public Map<String, String> getEventHttpHeaders(String route) {
         int slash = route.indexOf('@');
         return eventHttpHeaders.get(slash == -1? route : route.substring(0, slash));
@@ -825,24 +864,19 @@ public class EventEmitter {
         if (!rpc) {
             req.setHeader(X_ASYNC, "true");
         }
-        // optional HTTP request headers
+        // optional HTTP request headers ("x-event-format" is a client-side
+        // serialization instruction - consumed here, not sent to the peer)
         if (headers != null) {
             for (Map.Entry<String, String> kv : headers.entrySet()) {
-                req.setHeader(kv.getKey(), kv.getValue());
+                if (!X_EVENT_FORMAT.equalsIgnoreCase(kv.getKey())) {
+                    req.setHeader(kv.getKey(), kv.getValue());
+                }
             }
         }
-        // propagate trace context: X-Trace-Id plus W3C "traceparent" (traceId + spanId) if available
-        String eventTraceId = event.getTraceId();
-        if (eventTraceId != null) {
-            req.setHeader(X_TRACE_ID, eventTraceId);
-            String traceParent = W3cTrace.format(eventTraceId, event.getSpanId());
-            if (traceParent != null) {
-                req.setHeader(W3cTrace.TRACEPARENT, traceParent);
-            }
-        }
+        setTraceHeaders(req, event);
         req.setUrl(url.getPath());
         req.setTargetHost(getTargetFromUrl(url));
-        byte[] b = event.toBytes();
+        byte[] b = event.toBytes(httpEventFormat(headers));
         req.setBody(b);
         req.setContentLength(b.length);
         EventEnvelope request = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
@@ -856,6 +890,30 @@ public class EventEmitter {
             request.setTracePath(event.getTracePath());
         }
         return Future.future(promise -> submitAsyncRequest(promise, request, timeout));
+    }
+
+    /**
+     * Propagate the trace context of an event-over-HTTP call: X-Trace-Id plus the W3C "traceparent"
+     * (traceId + spanId) if available. When a custom traceparent header name is configured
+     * (http.traceparent.header), the same value is stamped under that name too, so the trace context
+     * survives an intermediary that strips the standard header.
+     *
+     * @param req the HTTP request to the peer's /api/event endpoint
+     * @param event the outgoing event carrying the current trace context
+     */
+    private void setTraceHeaders(AsyncHttpRequest req, EventEnvelope event) {
+        String eventTraceId = event.getTraceId();
+        if (eventTraceId != null) {
+            req.setHeader(X_TRACE_ID, eventTraceId);
+            String traceParent = W3cTrace.format(eventTraceId, event.getSpanId());
+            if (traceParent != null) {
+                req.setHeader(W3cTrace.TRACEPARENT, traceParent);
+                String customTraceparent = HttpRouter.getTraceparentHeader();
+                if (!W3cTrace.TRACEPARENT.equalsIgnoreCase(customTraceparent)) {
+                    req.setHeader(customTraceparent, traceParent);
+                }
+            }
+        }
     }
 
     private void submitAsyncRequest(Promise<EventEnvelope> promise, EventEnvelope request, long timeout) {
@@ -961,24 +1019,19 @@ public class EventEmitter {
         if (!rpc) {
             req.setHeader(X_ASYNC, "true");
         }
-        // optional HTTP request headers
+        // optional HTTP request headers ("x-event-format" is a client-side
+        // serialization instruction - consumed here, not sent to the peer)
         if (headers != null) {
             for (Map.Entry<String, String> kv : headers.entrySet()) {
-                req.setHeader(kv.getKey(), kv.getValue());
+                if (!X_EVENT_FORMAT.equalsIgnoreCase(kv.getKey())) {
+                    req.setHeader(kv.getKey(), kv.getValue());
+                }
             }
         }
-        // propagate trace context: X-Trace-Id plus W3C "traceparent" (traceId + spanId) if available
-        String eventTraceId = event.getTraceId();
-        if (eventTraceId != null) {
-            req.setHeader(X_TRACE_ID, eventTraceId);
-            String traceParent = W3cTrace.format(eventTraceId, event.getSpanId());
-            if (traceParent != null) {
-                req.setHeader(W3cTrace.TRACEPARENT, traceParent);
-            }
-        }
+        setTraceHeaders(req, event);
         req.setUrl(url.getPath());
         req.setTargetHost(getTargetFromUrl(url));
-        byte[] b = event.toBytes();
+        byte[] b = event.toBytes(httpEventFormat(headers));
         req.setBody(b);
         req.setContentLength(b.length);
         EventEnvelope apiRequest = new EventEnvelope().setTo(AsyncHttpClient.ASYNC_HTTP_REQUEST).setBody(req);
@@ -1240,7 +1293,8 @@ public class EventEmitter {
         String from = first.getFrom();
         String traceId = first.getTraceId();
         String tracePath = first.getTracePath();
-        AsyncMultiInbox inbox = new AsyncMultiInbox(events.size(), from, traceId, tracePath, timeout, timeoutException);
+        AsyncMultiInbox inbox = new AsyncMultiInbox(events.size(), from, traceId, tracePath,
+                first.getSpanId(), timeout, timeoutException);
         String cid = inbox.getCorrelationId();
         Platform platform = Platform.getInstance();
         EventBus system = platform.getEventSystem();
@@ -1340,7 +1394,8 @@ public class EventEmitter {
         String from = first.getFrom();
         String traceId = first.getTraceId();
         String tracePath = first.getTracePath();
-        FutureMultiInbox inbox = new FutureMultiInbox(events.size(), from, traceId, tracePath, timeout, timeoutException);
+        FutureMultiInbox inbox = new FutureMultiInbox(events.size(), from, traceId, tracePath,
+                first.getSpanId(), timeout, timeoutException);
         String cid = inbox.getCorrelationId();
         Platform platform = Platform.getInstance();
         EventBus system = platform.getEventSystem();

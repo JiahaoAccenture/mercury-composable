@@ -21,8 +21,11 @@ package com.accenture.minigraph.services;
 import com.accenture.automation.SimplePluginLoader;
 import com.accenture.automation.SimpleTypeMatchingConverter;
 import com.accenture.minigraph.common.GraphLambdaFunction;
+import com.accenture.minigraph.common.GraphModelValidator;
+import com.accenture.minigraph.models.CompiledGraphs;
 import com.accenture.minigraph.models.GraphInstance;
 import com.accenture.minigraph.models.GraphSession;
+import com.accenture.models.Flows;
 import com.jayway.jsonpath.InvalidPathException;
 import org.platformlambda.core.annotations.OptionalService;
 import org.platformlambda.core.annotations.PreLoad;
@@ -55,9 +58,11 @@ public class GraphCommandService extends GraphLambdaFunction {
     private static final Logger log = LoggerFactory.getLogger(GraphCommandService.class);
     private static final ManagedCache cachedMessage = ManagedCache.createCache("last.ws.message", 1000);
     private static final String DEFAULT_TEMP_DIR = "/tmp/graph";
-    private static final String DEFAULT_DEPLOY_DIR = "classpath:/graph";
     private static final String OUTCOME = "outcome";
     private static final String PLAYGROUND = "playground";
+    private static final String NODES = "nodes";
+    private static final String PROPERTIES = "properties";
+    private static final String TOTAL = "Total ";
     private static final String INVALID_GRAPH_NAME = "Invalid filename - must be a-z, A-Z, 0-9 with optional hyphen";
     private static final String SESSION_TAG = "Session ";
     private static final long EXPIRY = 20 * 1000L;
@@ -96,15 +101,10 @@ public class GraphCommandService extends GraphLambdaFunction {
             }
         }
         log.info("Playground temp folder (location.graph.temp) - {}", location);
-        // load deploy graph location
-        var deployLocation = config.getProperty("location.graph.deployed", DEFAULT_DEPLOY_DIR);
-        if (deployLocation.startsWith(FILE_PREFIX) || deployLocation.startsWith(CLASSPATH_PREFIX)) {
-            this.deployedGraphLocation = deployLocation;
-        } else {
-            log.error("location.graph.temp must start with file:/ or classpath:/. Fallback to {}", DEFAULT_DEPLOY_DIR);
-            this.deployedGraphLocation = DEFAULT_DEPLOY_DIR;
-        }
-        log.info("Deployed graph model folder (location.graph.deployed) - {}", this.deployedGraphLocation);
+        // resolved and validated by CompileGraph from the graph manifest's 'location'
+        // entry - @BeforeApplication runs before functions are preloaded, so the
+        // registry is already populated when this constructor executes
+        this.deployedGraphLocation = CompiledGraphs.getDeployedLocation();
         // initial housekeeping to remove expired temp graph from previous session
         housekeeping();
         // schedule housekeeping for ongoing clean up of expired temp graphs
@@ -138,6 +138,9 @@ public class GraphCommandService extends GraphLambdaFunction {
         var out = input.get(OUT);
         var message = input.get(MESSAGE);
         var forwarded = input.get(FORWARDED) instanceof Boolean flag && flag;
+        // "direct" marks a synchronous companion RPC (finding #62): not a flaky
+        // WS client, so the identical-command dedup guard does not apply
+        var direct = input.get(DIRECT) instanceof Boolean d && d;
         if (OPEN.equals(type) && in instanceof String inRoute) {
             sessions.put(inRoute, new GraphSession(inRoute));
             graphModels.put(inRoute, new MiniGraph());
@@ -157,44 +160,65 @@ public class GraphCommandService extends GraphLambdaFunction {
                 message instanceof String text) {
             var command = text.trim();
             if (!command.isEmpty()) {
-                handleCommand(po, command, inRoute, outRoute, forwarded);
+                handleCommand(po, command, inRoute, outRoute, forwarded, direct);
             }
         }
     }
 
-    private void handleCommand(PostOffice po, String command, String inRoute, String outRoute, boolean forwarded)
+    private void handleCommand(PostOffice po, String command, String inRoute, String outRoute,
+                               boolean forwarded, boolean direct)
             throws IOException {
         if (command.startsWith("{") && command.endsWith("}")) {
             handleJsonCommand(po, outRoute, command);
-        } else {
-            if (command.startsWith(SESSION) || forwarded) {
-                singleOrMultiLineCommand(po, command, inRoute, outRoute);
-                return;
-            }
-            var cached = cachedMessage.get(inRoute);
-            if (command.equals(cached)) {
-                log.debug("Duplicated message - {} for {}", command, inRoute);
-                return;
-            }
-            cachedMessage.put(inRoute, command);
-            var me = sessions.get(inRoute);
-            if (me.isPrimary()) {
-                singleOrMultiLineCommand(po, command, inRoute, outRoute);
-                for (var subOutRoute: me.getSubscribers()) {
-                    var subInRoute = GraphSession.getInRoute(subOutRoute);
-                    var forwardBody = Map.of(TYPE, COMMAND, IN, subInRoute, OUT, subOutRoute,
-                            MESSAGE, command, FORWARDED, true);
-                    po.send(new EventEnvelope().setTo(ROUTE).setBody(forwardBody));
-                }
-            } else {
-                // Except for the session commands, forward request to the primary session.
-                // Override the inRoute and outRoute accordingly.
-                var targetInRoute = GraphSession.getInRoute(me.getTargetId());
-                var targetOutRoute = GraphSession.getOutRoute(me.getTargetId());
-                var forwardBody = Map.of(TYPE, COMMAND, IN, targetInRoute, OUT, targetOutRoute, MESSAGE, command);
-                po.send(new EventEnvelope().setTo(ROUTE).setBody(forwardBody));
-            }
+            return;
         }
+        if (command.startsWith(SESSION) || forwarded) {
+            singleOrMultiLineCommand(po, command, inRoute, outRoute);
+            return;
+        }
+        // the dedup guard protects the WS UI from double-submits; a synchronous
+        // companion RPC ("direct") is a deliberate request - never dropped (#62)
+        if (!direct && isDuplicate(inRoute, command)) {
+            return;
+        }
+        var me = sessions.get(inRoute);
+        if (me.isPrimary()) {
+            runAsPrimary(po, command, inRoute, outRoute, me);
+        } else {
+            forwardToPrimary(po, command, me);
+        }
+    }
+
+    private boolean isDuplicate(String inRoute, String command) {
+        var cached = cachedMessage.get(inRoute);
+        if (command.equals(cached)) {
+            log.debug("Duplicated message - {} for {}", command, inRoute);
+            return true;
+        }
+        cachedMessage.put(inRoute, command);
+        return false;
+    }
+
+    private void runAsPrimary(PostOffice po, String command, String inRoute, String outRoute, GraphSession me)
+            throws IOException {
+        singleOrMultiLineCommand(po, command, inRoute, outRoute);
+        for (var subOutRoute: me.getSubscribers()) {
+            var subInRoute = GraphSession.getInRoute(subOutRoute);
+            var forwardBody = Map.of(TYPE, COMMAND, IN, subInRoute, OUT, subOutRoute,
+                    MESSAGE, command, FORWARDED, true);
+            po.send(new EventEnvelope().setTo(ROUTE).setBody(forwardBody));
+        }
+    }
+
+    /**
+     * Except for the session commands, forward request to the primary session.
+     * Override the inRoute and outRoute accordingly.
+     */
+    private void forwardToPrimary(PostOffice po, String command, GraphSession me) {
+        var targetInRoute = GraphSession.getInRoute(me.getTargetId());
+        var targetOutRoute = GraphSession.getOutRoute(me.getTargetId());
+        var forwardBody = Map.of(TYPE, COMMAND, IN, targetInRoute, OUT, targetOutRoute, MESSAGE, command);
+        po.send(new EventEnvelope().setTo(ROUTE).setBody(forwardBody));
     }
 
     private void singleOrMultiLineCommand(PostOffice po, String command, String inRoute, String outRoute)
@@ -266,7 +290,7 @@ public class GraphCommandService extends GraphLambdaFunction {
             return false;
         } else {
             var stateMachine = instance.stateMachine;
-            stateMachine.setElement(INPUT_BODY_NAMESPACE, content);
+            stateMachine.setElement(INPUT_BODY, content);
             var po = EventEmitter.getInstance();
             po.send(outRoute, "Mock data loaded into 'input.body' namespace");
             return true;
@@ -293,6 +317,50 @@ public class GraphCommandService extends GraphLambdaFunction {
     public static boolean hasSession(String id) {
         var inRoute = GraphSession.getInRoute(id);
         return graphModels.containsKey(inRoute);
+    }
+
+    /**
+     * Session-topology subcommands (subscribe/unsubscribe/reset) are a WebSocket-session
+     * privilege on both companion endpoints: a companion is an <b>assistant to</b> the
+     * session named in the URL, not a WebSocket session of its own. On the synchronous
+     * endpoint they would also bind the per-request capture route
+     * ({@code companion.sync.<uuid>}, released when the POST returns) as a durable
+     * subscriber. Only the read-only {@code session} status query is allowed.
+     *
+     * @param command the trimmed command text
+     * @return the offending subcommand, or null when the command is allowed
+     */
+    public static String sessionTopologySubcommand(String command) {
+        var words = command.trim().split("\\s+");
+        if (words.length < 2 || !"session".equalsIgnoreCase(words[0])) {
+            return null;
+        }
+        var sub = words[1].toLowerCase();
+        return switch (sub) {
+            case "subscribe", "unsubscribe", "reset" -> sub;
+            default -> null;
+        };
+    }
+
+    /**
+     * Refuse a session-topology command on a companion endpoint: echo the refusal to the
+     * session's live console (the watching human sees what the AI caller sees) and return
+     * the error text for the endpoint's own reply shape.
+     *
+     * @param outRoute the session's WebSocket output route
+     * @param command the offending command
+     * @param sub the offending subcommand from {@link #sessionTopologySubcommand(String)}
+     * @return the refusal message
+     */
+    public static String refuseSessionTopology(String outRoute, String command, String sub) {
+        var error = "session " + sub + " is not available on the companion endpoint - a companion is an " +
+                "assistant to this session, not a WebSocket session; use the read-only 'session' " +
+                "command here, and manage subscriptions from a WebSocket-connected session";
+        var emitter = EventEmitter.getInstance();
+        for (var line : new String[]{"> " + command, error}) {
+            emitter.send(new EventEnvelope().setTo(outRoute).setBody(line));
+        }
+        return error;
     }
 
     private void handleCommandPartTwo(PostOffice po, String inRoute, String outRoute, List<String> words) {
@@ -334,16 +402,33 @@ public class GraphCommandService extends GraphLambdaFunction {
         } else if (words.size() > 1 && words.getFirst().equalsIgnoreCase(EXECUTE)) {
             handleExecuteCommand(inRoute, outRoute, words);
         } else if (words.size() == 1 && words.getFirst().equalsIgnoreCase(RUN)) {
-            handleRunCommand(inRoute, outRoute);
+            handleRunCommand(po, inRoute, outRoute);
         } else {
             po.send(new EventEnvelope().setTo(outRoute).setBody(TRY_HELP));
         }
     }
 
-    private void handleRunCommand(String inRoute, String outRoute) {
+    private void handleRunCommand(PostOffice po, String inRoute, String outRoute) {
+        // pre-run quality check, reusing the deployment gate's whole-graph rules:
+        // draft authoring deliberately allows partial models, but the moment the
+        // author asks to run, the suspend/resume contract must hold - the same
+        // rules CompileGraph enforces for deployed graphs
+        var graphInstance = graphInstances.get(inRoute);
+        if (graphInstance != null) {
+            try {
+                GraphModelValidator.validateSuspendResume(graphInstance.graph);
+            } catch (IllegalArgumentException e) {
+                po.send(new EventEnvelope().setTo(outRoute).setBody("Unable to run - " + e.getMessage()));
+                // the uniform end-of-transmission line, matching the traveler's
+                // failure shape so the sync companion's drain stays deterministic
+                po.send(new EventEnvelope().setTo(outRoute).setStatus(400)
+                        .setBody("Graph traversal aborted"));
+                return;
+            }
+        }
         var cid = util.getUuid();
-        var po = PostOffice.trackable("minigraph.playground", cid, "/graph/playground");
-        po.send(new EventEnvelope().setTo(GraphTraveler.ROUTE).setHeader(IN, inRoute)
+        var tpo = PostOffice.trackable("minigraph.playground", cid, "/graph/playground");
+        tpo.send(new EventEnvelope().setTo(GraphTraveler.ROUTE).setHeader(IN, inRoute)
                 .setReplyTo(outRoute).setCorrelationId(cid));
     }
 
@@ -367,7 +452,7 @@ public class GraphCommandService extends GraphLambdaFunction {
             if (root.get()) result.add(ROOT);
             result.addAll(nodes);
             if (end.get()) result.add(END);
-            po.send(new EventEnvelope().setTo(outRoute).setBody("Total "+result.size()+
+            po.send(new EventEnvelope().setTo(outRoute).setBody(TOTAL+result.size()+
                                                 " node"+(result.size() == 1? "" : "s")+" have been seen"));
             po.send(new EventEnvelope().setTo(outRoute).setBody(result));
         }
@@ -546,14 +631,254 @@ public class GraphCommandService extends GraphLambdaFunction {
     private void handleListCommand(PostOffice po, String inRoute, String outRoute, String type) {
         var graph = graphModels.get(inRoute);
         var sb = new StringBuilder();
-        if ("nodes".equalsIgnoreCase(type)) {
+        if (NODES.equalsIgnoreCase(type)) {
             listNodes(graph, sb);
         } else if ("connections".equalsIgnoreCase(type)) {
             listConnections(graph, sb);
+        } else if ("graphs".equalsIgnoreCase(type)) {
+            listGraphs(sb);
+        } else if ("flows".equalsIgnoreCase(type)) {
+            listFlows(sb);
         } else {
-            sb.append("Please use 'list nodes' or 'list connections'");
+            sb.append("Please use 'list nodes', 'list connections', 'list graphs' or 'list flows'");
         }
         po.send(new EventEnvelope().setTo(outRoute).setBody(sb.toString()));
+    }
+
+    /**
+     * Discovery: the graph models a graph.extension node can delegate to
+     * (extension={graph-id}) - the compiled registry united with the deployed
+     * location's *.json files - each with its root "purpose" so the listing
+     * reads as living documentation.
+     */
+    private void listGraphs(StringBuilder sb) {
+        var ids = new TreeSet<>(CompiledGraphs.getAllGraphs());
+        ids.addAll(deployedGraphIds());
+        if (ids.isEmpty()) {
+            sb.append("No graph models deployed");
+            return;
+        }
+        sb.append("Deployed graph models - extension={graph-id} targets:\n");
+        for (var id : ids) {
+            var purpose = graphPurpose(id);
+            sb.append(purpose == null? id : id + " - " + purpose).append('\n');
+        }
+        sb.append(TOTAL).append(ids.size()).append(ids.size() == 1? " graph model" : " graph models").append('\n');
+        sb.append("Use 'describe graph {graph-id}' for a model's input/output contract");
+    }
+
+    /**
+     * Discovery: the Event Script flows a graph.extension node can call
+     * (extension=flow://{flow-id}).
+     * <p>
+     * Discovery: the CONTRACT view of a deployed graph model - purpose, size,
+     * and the input/output surface derived from the model's node properties -
+     * so an agent can wire extension= delegation without out-of-band
+     * knowledge or trial execution.
+     */
+    private void describeDeployedGraph(PostOffice po, String outRoute, String graphId) {
+        var model = deployedModel(graphId);
+        if (model.isEmpty()) {
+            po.send(new EventEnvelope().setTo(outRoute).setBody("Graph model '" + graphId + "'" + NOT_FOUND));
+            return;
+        }
+        var nodes = model.get(NODES) instanceof List<?> n? n.size() : 0;
+        var connections = model.get("connections") instanceof List<?> c? c.size() : 0;
+        var sb = new StringBuilder();
+        sb.append("Deployed graph model '").append(graphId).append("'\n");
+        var purpose = graphPurpose(graphId);
+        if (purpose != null) {
+            sb.append("Purpose: ").append(purpose).append('\n');
+        }
+        sb.append("Nodes: ").append(nodes).append(", connections: ").append(connections).append('\n');
+        var inputs = new TreeSet<String>();
+        var outputs = new TreeSet<String>();
+        collectModelSurface(model, inputs, outputs);
+        appendSurface(sb, "Input surface", inputs);
+        appendSurface(sb, "Output surface", outputs);
+        sb.append("(derived from the model's data mappings)");
+        po.send(new EventEnvelope().setTo(outRoute).setBody(sb.toString()));
+    }
+
+    /**
+     * Derive the input/output surface from every node's properties (mapping
+     * entries, plugin args, substitution variables in statements).
+     */
+    private void collectModelSurface(Map<String, Object> model, TreeSet<String> inputs, TreeSet<String> outputs) {
+        if (model.get(NODES) instanceof List<?> nodeList) {
+            for (var n : nodeList) {
+                if (n instanceof Map<?, ?> node && node.get(PROPERTIES) != null) {
+                    var text = propertiesAsText(node.get(PROPERTIES));
+                    collectPathTokens(text, "input.", inputs);
+                    collectPathTokens(text, "output.", outputs);
+                }
+            }
+        }
+    }
+
+    /**
+     * JSON form of a node's properties - the same text shape the Rust engine
+     * scans, so the derived contract stays byte-identical across engines.
+     */
+    private static String propertiesAsText(Object properties) {
+        try {
+            return SimpleMapper.getInstance().getMapper().writeValueAsString(properties);
+        } catch (Exception e) {
+            return String.valueOf(properties);
+        }
+    }
+
+    private static void appendSurface(StringBuilder sb, String title, TreeSet<String> paths) {
+        sb.append(title).append(":\n");
+        if (paths.isEmpty()) {
+            sb.append("  (none referenced)\n");
+        }
+        for (var path : paths) {
+            sb.append("  ").append(path).append('\n');
+        }
+    }
+
+    /**
+     * A deployed/compiled graph model (compiled registry first, then the
+     * deployed location). Returns an empty map when the graph id is unknown
+     * or its deployed JSON cannot be parsed.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> deployedModel(String graphId) {
+        Map<String, Object> model = CompiledGraphs.getGraph(graphId);
+        if (model != null) {
+            return model;
+        }
+        var json = getDeployedGraphAsText(graphId);
+        if (json == null) {
+            return Collections.emptyMap();
+        }
+        try {
+            return SimpleMapper.getInstance().getMapper().readValue(json, Map.class);
+        } catch (Exception e) {
+            return Collections.emptyMap();
+        }
+    }
+
+    /**
+     * Collect dotted-path tokens starting with the prefix from free text
+     * (mapping entries, plugin args, substitution variables in statements).
+     */
+    private void collectPathTokens(String text, String prefix, TreeSet<String> found) {
+        int start = 0;
+        while (start != -1) {
+            start = nextPathToken(text, prefix, start, found);
+        }
+    }
+
+    /**
+     * Scan one prefix occurrence from the start position, adding a well-formed
+     * token to the collection. Returns the next scan position, or -1 when the
+     * text is exhausted.
+     */
+    private int nextPathToken(String text, String prefix, int start, TreeSet<String> found) {
+        int begin = text.indexOf(prefix, start);
+        if (begin == -1) {
+            return -1;
+        }
+        // a mid-word match is part of a longer identifier, not a path token
+        if (begin > 0 && isWordChar(text.charAt(begin - 1))) {
+            return begin + prefix.length();
+        }
+        int end = begin + prefix.length();
+        while (end < text.length() && isTokenChar(text.charAt(end))) {
+            end++;
+        }
+        var token = trimToken(text.substring(begin, end));
+        if (token.length() > prefix.length()) {
+            found.add(token);
+        }
+        return end;
+    }
+
+    private static boolean isWordChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '.';
+    }
+
+    private static boolean isTokenChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-' || c == '[' || c == ']';
+    }
+
+    /**
+     * Strip trailing separators, then a trailing ']' when there is no matching
+     * '[' (unbalanced - can arise from non-JSON serialization forms where a
+     * list's closing bracket is absorbed).
+     */
+    private static String trimToken(String token) {
+        var result = token;
+        while (!result.isEmpty() && (result.endsWith(".") || result.endsWith("-") || result.endsWith("["))) {
+            result = result.substring(0, result.length() - 1);
+        }
+        while (result.endsWith("]") && result.indexOf('[') == -1) {
+            result = result.substring(0, result.length() - 1);
+        }
+        return result;
+    }
+
+    private void listFlows(StringBuilder sb) {
+        var ids = new ArrayList<>(Flows.getAllFlows());
+        if (ids.isEmpty()) {
+            sb.append("No flows deployed");
+            return;
+        }
+        Collections.sort(ids);
+        sb.append("Event Script flows - extension=flow://{flow-id} targets:\n");
+        for (var id : ids) {
+            var flow = Flows.getFlow(id);
+            var description = flow == null? null : flow.description;
+            sb.append(description == null || description.isBlank()? id : id + " - " + description.trim()).append('\n');
+        }
+        sb.append(TOTAL).append(ids.size()).append(ids.size() == 1? " flow" : " flows");
+    }
+
+    /**
+     * The deployed location as an enumerable directory: a file: location
+     * directly; a classpath: location only when it resolves to an exploded
+     * directory (not enumerable inside a packaged jar - the compiled registry
+     * still lists those models).
+     */
+    private List<String> deployedGraphIds() {
+        var result = new ArrayList<String>();
+        File dir = null;
+        if (deployedGraphLocation.startsWith(FILE_PREFIX)) {
+            dir = new File(deployedGraphLocation.substring(FILE_PREFIX.length()));
+        } else if (deployedGraphLocation.startsWith(CLASSPATH_PREFIX)) {
+            var url = this.getClass().getResource(deployedGraphLocation.substring(CLASSPATH_PREFIX.length()));
+            if (url != null && "file".equals(url.getProtocol())) {
+                dir = new File(url.getPath());
+            }
+        }
+        if (dir != null && dir.isDirectory()) {
+            var files = dir.list((d, name) -> name.endsWith(JSON_EXT));
+            if (files != null) {
+                for (var f : files) {
+                    result.add(f.substring(0, f.length() - JSON_EXT.length()));
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The root node's "purpose" property of a deployed/compiled graph model.
+     */
+    private String graphPurpose(String graphId) {
+        Map<String, Object> model = deployedModel(graphId);
+        if (model.get(NODES) instanceof List<?> nodes) {
+            for (var n : nodes) {
+                if (n instanceof Map<?, ?> node && "root".equals(node.get("alias"))
+                        && node.get(PROPERTIES) instanceof Map<?, ?> properties
+                        && properties.get("purpose") instanceof String purpose && !purpose.isBlank()) {
+                    return purpose.trim();
+                }
+            }
+        }
+        return null;
     }
 
     private void listNodes(MiniGraph graph, StringBuilder sb) {
@@ -1051,10 +1376,19 @@ public class GraphCommandService extends GraphLambdaFunction {
                 }
             }
             var stateMachine = graphInstance.stateMachine;
-            if (!stateMachine.exists(INPUT_BODY_NAMESPACE)) {
-                stateMachine.setElement(INPUT_BODY_NAMESPACE, new HashMap<>());
+            if (!stateMachine.exists(INPUT_BODY)) {
+                stateMachine.setElement(INPUT_BODY, new HashMap<>());
             }
             stateMachine.setElement(OUTPUT, new HashMap<>());
+            // the instantiate command is the dry-run's edge: like the REST edge, it
+            // guarantees a business correlation ID - auto-created when the initial data
+            // mapping did not supply one, with a reminder so the user knows
+            if (!(stateMachine.getElement(MODEL_CID) instanceof String cid) || cid.isBlank()) {
+                var generated = util.getUuid();
+                stateMachine.setElement(MODEL_CID, generated);
+                po.send(new EventEnvelope().setTo(outRoute).setBody(
+                        "No business correlation ID given - this dry-run created model.cid = " + generated));
+            }
             var timeout = getModelTtl(graphInstance);
             log.info("Instantiate graph with {} nodes, model.ttl = {} ms", nodeCount, timeout);
             graphInstances.put(inRoute, graphInstance);
@@ -1081,7 +1415,7 @@ public class GraphCommandService extends GraphLambdaFunction {
         var rhs = line.substring(sep + MAP_TO.length()).trim();
         var constant = helper.getConstantValue(lhs);
         if (constant != null) {
-            if (rhs.startsWith(INPUT_HEADER_NAMESPACE) || rhs.startsWith(INPUT_BODY_NAMESPACE) ||
+            if (rhs.startsWith(INPUT_HEADER_NAMESPACE) || rhs.startsWith(INPUT_BODY) ||
                     rhs.startsWith(MODEL_NAMESPACE)) {
                 instance.stateMachine.setElement(rhs, constant);
                 count.incrementAndGet();
@@ -1096,7 +1430,9 @@ public class GraphCommandService extends GraphLambdaFunction {
 
     private void handleDescribeCommand(PostOffice po, String inRoute, String outRoute, List<String> words)
             throws IOException {
-        if (words.size() > 1 && words.get(1).equalsIgnoreCase(GRAPH)) {
+        if (words.size() == 3 && words.get(1).equalsIgnoreCase(GRAPH)) {
+            describeDeployedGraph(po, outRoute, words.get(2));
+        } else if (words.size() > 1 && words.get(1).equalsIgnoreCase(GRAPH)) {
             describeGraph(po, inRoute, outRoute);
         } else if (words.size() == 3 && words.get(1).equalsIgnoreCase(SKILL)) {
             describeSkill(po, outRoute, words.get(2));
@@ -1218,10 +1554,10 @@ public class GraphCommandService extends GraphLambdaFunction {
 
     private void handleUpdateNode(PostOffice po, String inRoute, String outRoute, String nodeName, List<String> lines) {
         var keyValues = getNodeProperties(lines);
+        var type = getNodeType(lines);
         // reject invalid data mapping syntax and auto-convert deprecated "simple type matching" to
         // "simple plugin" syntax before the properties are stored in the node
-        var deprecationNotice = convertMappingProperties(keyValues);
-        var type = getNodeType(lines);
+        var deprecationNotice = convertMappingProperties(keyValues, type);
         var graph = graphModels.get(inRoute);
         if (graph != null) {
             updateNode(po, graph, outRoute, nodeName, type, keyValues, deprecationNotice);
@@ -1249,10 +1585,10 @@ public class GraphCommandService extends GraphLambdaFunction {
 
     private void handleCreateNode(PostOffice po, String inRoute, String outRoute, String nodeName, List<String> lines) {
         var keyValues = getNodeProperties(lines);
+        var type = getNodeType(lines);
         // reject invalid data mapping syntax and auto-convert deprecated "simple type matching" to
         // "simple plugin" syntax before the properties are stored in the node
-        var deprecationNotice = convertMappingProperties(keyValues);
-        var type = getNodeType(lines);
+        var deprecationNotice = convertMappingProperties(keyValues, type);
         var graph = graphModels.get(inRoute);
         if (graph != null) {
             createNode(po, graph, outRoute, nodeName, type, keyValues, deprecationNotice);
@@ -1290,10 +1626,16 @@ public class GraphCommandService extends GraphLambdaFunction {
      * @return a deprecation notice if any entry was auto-converted, otherwise null
      * @throws IllegalArgumentException when a data mapping entry has invalid syntax
      */
-    private String convertMappingProperties(MultiLevelMap keyValues) {
+    private String convertMappingProperties(MultiLevelMap keyValues, String type) {
         var map = keyValues.getMap();
         List<String> conversions = new ArrayList<>();
         for (String property : MAPPING_PROPERTIES) {
+            // A Dictionary node's input[] holds parameter declarations
+            // ("param" or "param:default"), not "LHS -> RHS" data mappings, so it
+            // is exempt from the mapping-syntax validation/conversion below.
+            if ("input".equals(property) && "Dictionary".equalsIgnoreCase(type)) {
+                continue;
+            }
             if (map.get(property) instanceof List<?> entries) {
                 List<String> converted = new ArrayList<>();
                 for (Object o : entries) {

@@ -19,6 +19,7 @@
 package com.accenture.minigraph.start;
 
 import com.accenture.automation.SimpleTypeMatchingConverter;
+import com.accenture.minigraph.common.GraphModelValidator;
 import com.accenture.minigraph.models.CompiledGraphs;
 import org.platformlambda.core.annotations.BeforeApplication;
 import org.platformlambda.core.graph.MiniGraph;
@@ -40,47 +41,78 @@ import java.util.Map;
  * <p>
  * CompileGraph is a quality gate for graph models, mirroring what CompileFlows does for event flows.
  * <p>
- * Today, GraphExecutor loads and parses a graph model's JSON file fresh on every request, and every
- * skill re-interprets each data-mapping string (LHS -&gt; RHS) on every node execution with no
- * upfront validation. CompileGraph optionally validates a declared set of graph models once at
- * startup instead:
+ * CompileGraph validates the declared set of deployed graph models once at startup:
  * <p>
  * 1. Structural validation - every node/connection is imported once via MiniGraph.importGraph(),
  *    which catches missing/duplicate alias, invalid types, and dangling connections early.
  * 2. Syntax conversion - the deprecated "simple type matching" syntax (model.someKey:type) found in
  *    "mapping", "input", "output" and "for_each" node properties is converted to the equivalent
  *    "simple plugin" syntax (f:type(model.someKey)) once, instead of being resolved on every node
- *    execution of every request.
+ *    execution of every request. A mapping/output/for_each entry without "-&gt;" rejects the
+ *    graph (it is guaranteed to fail at runtime); an "input" entry without "-&gt;" is skill
+ *    vocabulary (e.g. the fetcher's dictionary parameter names) and passes through.
+ * 3. Discovery contract and completeness - every deployable graph must document itself
+ *    (the root node needs a non-empty 'purpose' property - what "list graphs" shows as
+ *    living documentation) and must have an 'end' node so every run can complete.
+ * 4. Suspend/resume contract - the static half of the workflow-suspension rules (reserved
+ *    'suspend' alias bound to the 'graph.suspend' skill, no suspension on routing skills, the
+ *    drawn checkpoint edge, mandatory 'ttl', a 'task' route on suspend/resume nodes); the
+ *    runtime guards remain the enforcement floor for graphs not in the manifest.
  * <p>
- * CompileGraph is opt-in: set "graph.model.automation" to a YAML file listing the graph IDs to
- * compile at startup (mirroring "yaml.flow.automation" for event flows). Graph IDs not listed in the
- * manifest continue to be loaded lazily by GraphExecutor exactly as before, so this is purely additive.
+ * CompileGraph is the deployment gate: set "graph.model.automation" to a YAML file listing the
+ * graph IDs to compile at startup (mirroring "yaml.flow.automation" for event flows). Like
+ * flows.yaml, the manifest carries the location of its own models in an optional "location"
+ * entry (file:/ or classpath:/, default "classpath:/graph") - there is no separate
+ * application.properties key. A deployed
+ * graph model is executable ONLY when it is listed in the manifest and passes this gate - a
+ * graph that fails, or is not listed, answers HTTP-404 as if it does not exist. This is the
+ * CompileFlows precedent: an invalid flow never becomes executable, and there is no lazy
+ * loading of unvalidated models.
  * Ad-hoc graphs created interactively through the dev playground are intentionally out of scope since
- * they are not known ahead of time.
+ * they are not known ahead of time (the playground dry-run runs from its own temp workspace).
  */
 @BeforeApplication(sequence = 6)
 public class CompileGraph implements EntryPoint {
     private static final Logger log = LoggerFactory.getLogger(CompileGraph.class);
     private static final SimpleTypeMatchingConverter converter = SimpleTypeMatchingConverter.getInstance();
     private static final Utility util = Utility.getInstance();
-    private static final String[] MAPPING_PROPERTIES = {"mapping", "input", "output", "for_each"};
+    private static final String INPUT = "input";
+    private static final String[] MAPPING_PROPERTIES = {"mapping", INPUT, "output", "for_each"};
     private static final String MAP_TO = "->";
     private static final String JSON_EXT = ".json";
     private static final String GRAPHS = "graphs";
     private static final String NODES = "nodes";
     private static final String PROPERTIES_SUFFIX = "].properties.";
+    private static final String NODE_NAME = "node ";
+    private static final String LOCATION = "location";
+    private static final String DEFAULT_DEPLOY_DIR = "classpath:/graph";
+    private static final String FILE_PREFIX = "file:/";
+    private static final String CLASSPATH_PREFIX = "classpath:/";
 
     @Override
     public void start(String[] args) {
         AppConfigReader config = AppConfigReader.getInstance();
+        if (!config.getProperty("location.graph.deployed", "").isBlank()) {
+            log.warn("location.graph.deployed is obsolete - " +
+                    "set 'location' in the graph manifest (graph.model.automation) instead");
+        }
         String manifest = config.getProperty("graph.model.automation", "");
         if (manifest.isBlank()) {
-            log.info("No graph manifest configured (graph.model.automation) - skipping graph compilation");
+            log.warn("No graph manifest configured (graph.model.automation) - " +
+                    "no deployed graph models will be executable");
             return;
         }
-        String deployLocation = config.getProperty("location.graph.deployed", "classpath:/graph");
         try {
             var reader = new ConfigReader(manifest);
+            // like flows.yaml, the manifest carries the location of its own models
+            var deployLocation = reader.getProperty(LOCATION, DEFAULT_DEPLOY_DIR);
+            if (!deployLocation.startsWith(FILE_PREFIX) && !deployLocation.startsWith(CLASSPATH_PREFIX)) {
+                log.warn("Graph manifest 'location' must start with file:/ or classpath:/. Fallback to {}",
+                        DEFAULT_DEPLOY_DIR);
+                deployLocation = DEFAULT_DEPLOY_DIR;
+            }
+            CompiledGraphs.setDeployedLocation(deployLocation);
+            log.info("Deployed graph model folder - {}", deployLocation);
             Object allGraphs = reader.get(GRAPHS);
             if (allGraphs instanceof List<?> list) {
                 for (int i = 0; i < list.size(); i++) {
@@ -100,12 +132,37 @@ public class CompileGraph implements EntryPoint {
             Map<String, Object> model = reader.getMap();
             convertDataMappingEntries(graphId, model);
             // structural validation - throws IllegalArgumentException for a malformed graph
-            new MiniGraph().importGraph(model);
+            var graph = new MiniGraph();
+            graph.importGraph(model);
+            // discovery contract: every deployable graph documents itself - the root
+            // node's 'purpose' is what "list graphs" shows as living documentation
+            if (!hasRootPurpose(model)) {
+                throw new IllegalArgumentException("root node must define a non-empty 'purpose' property");
+            }
+            // every run must be able to complete - GraphExecutor trusts this at runtime
+            if (graph.getEndNode() == null) {
+                throw new IllegalArgumentException("graph must have an 'end' node");
+            }
+            GraphModelValidator.validateSuspendResume(graph);
             CompiledGraphs.addGraph(graphId, model);
             log.info("Compiled graph {}", graphId);
         } catch (IllegalArgumentException e) {
-            log.error("Skip invalid graph {} - {}", graphId, e.getMessage());
+            // a rejected graph is simply not registered: deployed execution is served
+            // exclusively from the compiled registry, so requests to it answer 404
+            log.error("Rejected graph {} - {}", graphId, e.getMessage());
         }
+    }
+
+    private boolean hasRootPurpose(Map<String, Object> model) {
+        if (model.get(NODES) instanceof List<?> nodes) {
+            for (var n : nodes) {
+                if (n instanceof Map<?, ?> node && "root".equals(node.get("alias"))) {
+                    return node.get("properties") instanceof Map<?, ?> properties
+                            && properties.get("purpose") instanceof String purpose && !purpose.isBlank();
+                }
+            }
+        }
+        return false;
     }
 
     private void convertDataMappingEntries(String graphId, Map<String, Object> model) {
@@ -134,10 +191,16 @@ public class CompileGraph implements EntryPoint {
                             graphId, nodeIndex, property, line, convertedLine);
                 }
                 converted.add(convertedLine);
-            } else {
-                log.error("Invalid data mapping in graph {} node[{}].{} - missing '->' in '{}'",
-                        graphId, nodeIndex, property, line);
+            } else if (INPUT.equals(property)) {
+                // an 'input' entry without '->' is skill vocabulary, not a data mapping -
+                // e.g. the fetcher's dictionary parameter names and feature flags
                 converted.add(line);
+            } else {
+                // a mapping/for_each/output entry is always a data mapping: a line
+                // without '->' is guaranteed to fail at runtime, so reject the graph
+                // (this class is a quality gate - a compiled graph must be runnable)
+                throw new IllegalArgumentException(NODE_NAME + "[" + nodeIndex + "]." + property +
+                        " - missing '" + MAP_TO + "' in '" + line + "'");
             }
         }
         return converted;

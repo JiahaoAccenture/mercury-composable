@@ -31,9 +31,9 @@ import org.platformlambda.core.annotations.ZeroTracing;
 import org.platformlambda.core.exception.AppException;
 import org.platformlambda.core.models.EventEnvelope;
 import org.platformlambda.core.models.SimpleNode;
+import org.platformlambda.core.system.EventEmitter;
 import org.platformlambda.core.system.PostOffice;
 import org.platformlambda.core.util.AppConfigReader;
-import org.platformlambda.core.util.ConfigReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,22 +46,12 @@ import java.util.Map;
 public class GraphExecutor extends GraphLambdaFunction {
     public static final String ROUTE = "graph.executor";
     private static final Logger log = LoggerFactory.getLogger(GraphExecutor.class);
-    private static final String DEFAULT_DEPLOY_DIR = "classpath:/graph";
     private static final String INSTANCE = "instance";
-    private final String deployedGraphLocation;
     private final boolean isDevEnv;
 
     public GraphExecutor() {
         var config = AppConfigReader.getInstance();
         this.isDevEnv = "dev".equals(config.getProperty("app.env", "dev"));
-        var deployLocation = config.getProperty("location.graph.deployed", DEFAULT_DEPLOY_DIR);
-        if (deployLocation.startsWith(FILE_PREFIX) || deployLocation.startsWith(CLASSPATH_PREFIX)) {
-            this.deployedGraphLocation = deployLocation;
-        } else {
-            log.error("location.graph.temp must start with file:/ or classpath:/. Fallback to {}", DEFAULT_DEPLOY_DIR);
-            this.deployedGraphLocation = DEFAULT_DEPLOY_DIR;
-        }
-        log.info("Deployed graph model folder (location.graph.deployed) - {}", this.deployedGraphLocation);
     }
 
     @Override
@@ -110,9 +100,6 @@ public class GraphExecutor extends GraphLambdaFunction {
         }
         flowInstance.setEndFlowListeners(GraphHousekeeper.ROUTE);
         var map = getGraphModel(graphId);
-        if (map.isEmpty()) {
-            throw new IllegalArgumentException("Unable to load graph model '"+graphId+"' - missing or invalid");
-        }
         GraphInstance graphInstance = new GraphInstance(graphId);
         graphInstance.setFlowInstanceId(flowInstanceId);
         graphInstance.setCorrelationId(cid);
@@ -134,15 +121,11 @@ public class GraphExecutor extends GraphLambdaFunction {
         stateMachine.setElement(MODEL, modelCopy);
         // map node properties to state machine
         initializeWithNodeProperties(graphInstance);
-        var root = graph.getRootNode();
-        if (root == null) {
-            throw new IllegalArgumentException("Root node does not exist");
-        }
-        var end = graph.getEndNode();
-        if (end == null) {
-            throw new IllegalArgumentException("End node does not exist");
-        }
-        walk(po, graphInstance, root, parentSpanId);
+        // a compiled model is guaranteed to have root and end nodes (the CompileGraph
+        // quality gate is the only door to deployed execution) - no per-request
+        // structural re-validation; the dry-run walker keeps its own checks because
+        // playground drafts never pass the gate
+        walk(po, graphInstance, graph.getRootNode(), null, parentSpanId);
     }
 
     private void handleSkillResponse(PostOffice po, EventEnvelope response) {
@@ -161,19 +144,25 @@ public class GraphExecutor extends GraphLambdaFunction {
             // Unrecoverable error from the node itself
             if (response.hasError()) {
                 if (target != null) {
-                    var eMap = getErrorMap(stateMachine.getElement(OUTPUT_BODY_NAMESPACE), target);
-                    stateMachine.setElement(OUTPUT_BODY_NAMESPACE, eMap);
+                    var eMap = getErrorMap(stateMachine.getElement(OUTPUT_BODY), target);
+                    stateMachine.setElement(OUTPUT_BODY, eMap);
                 }
                 handleErrorResponse(po, graphInstance, response, parentSpanId);
                 return;
             }
             var graph = graphInstance.graph;
             var node = graph.findNodeByAlias(nodeName);
-            graphInstance.skillRun.put(nodeName, true);
             checkFrequency(po, graphInstance, nodeName, parentSpanId);
             // Skill handler can also set status and error in its node properties instead of throwing exception
             var processStatus = stateMachine.getElement(nodeName + "." + STATUS);
             var resultError = stateMachine.getElement(nodeName + "." + ERROR);
+            // Mark the skill complete only when it did NOT fail (status + error set,
+            // e.g. an exception-routed fetcher): a join barrier consults skillRun,
+            // so a failed branch must not satisfy the barrier while it retries.
+            // GraphTraveler keeps identical semantics.
+            if (!(processStatus instanceof Integer && resultError != null)) {
+                graphInstance.skillRun.put(nodeName, true);
+            }
             // Skill handler would set status and error in its node properties
             // e.g. the HTTP response status code to the API fetcher >= 400
             var errorHandler = node.getProperty(EXCEPTION);
@@ -220,43 +209,56 @@ public class GraphExecutor extends GraphLambdaFunction {
         }
     }
 
-    private void walk(PostOffice po, GraphInstance graphInstance, SimpleNode node, String parentSpanId) {
+    private void walk(PostOffice po, GraphInstance graphInstance, SimpleNode node, String from, String parentSpanId) {
         if (!graphInstance.complete.get()) {
             var nodeName = node.getAlias();
             String skill = node.getProperty(SKILL) != null ? String.valueOf(node.getProperty(SKILL)) : null;
-            var seen = !GraphJoin.ROUTE.equals(skill) && graphInstance.nodeSeen.get(nodeName) != null;
-            if (!seen) {
-                graphInstance.nodeSeen.put(nodeName, true);
-                walkTo(po, skill, graphInstance, node, parentSpanId);
+            // atomic mark-and-test: concurrent branches converging on the same
+            // non-join node must not dispatch it twice (a join always evaluates -
+            // its barrier logic owns the dedup)
+            var isJoin = GraphJoin.ROUTE.equals(skill);
+            var seen = graphInstance.nodeSeen.putIfAbsent(nodeName, true) != null;
+            if (isJoin || !seen) {
+                walkTo(po, skill, graphInstance, node, from, parentSpanId);
             }
         }
     }
 
-    private void walkTo(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node, String parentSpanId) {
+    private void walkTo(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node,
+                        String from, String parentSpanId) {
         var graph = graphInstance.graph;
         var endNode = graph.getEndNode();
         if (endNode.getId().equals(node.getId())) {
             if (skill != null) {
-                executeSkill(po, skill, graphInstance, node, parentSpanId);
+                executeSkill(po, skill, graphInstance, node, from, parentSpanId);
             } else {
                 executionComplete(po, graphInstance, parentSpanId);
             }
         } else {
             if (skill != null) {
-                executeSkill(po, skill, graphInstance, node, parentSpanId);
+                executeSkill(po, skill, graphInstance, node, from, parentSpanId);
+            } else if (isSuspensible(node)) {
+                walkToSuspendNode(po, graphInstance, node, parentSpanId);
             } else {
-                walkNext(po, graphInstance, node, parentSpanId);
+                walkNext(po, graphInstance, node, parentSpanId, false);
             }
         }
     }
 
     @SuppressWarnings("unchecked")
     private void executionComplete(PostOffice po, GraphInstance graphInstance, String parentSpanId) {
-        var body = graphInstance.stateMachine.getElement(OUTPUT_BODY_NAMESPACE);
+        var body = graphInstance.stateMachine.getElement(OUTPUT_BODY);
         var hdr = graphInstance.stateMachine.getElement(OUTPUT_HEADER_NAMESPACE);
         var headers = hdr instanceof Map ? (Map<String, Object>) hdr : new HashMap<String, Object>();
         var response = new EventEnvelope().setTo(graphInstance.getReplyTo())
                 .setCorrelationId(graphInstance.getCorrelationId()).setSpanId(parentSpanId);
+        // a graph may stage its own HTTP status declaratively, e.g. 'int(404) -> output.status'
+        // in a rejection node - the surrounding flow's 'status -> output.status' mapping then
+        // carries it to the caller
+        var status = graphInstance.stateMachine.getElement(OUTPUT_NAMESPACE + STATUS);
+        if (status != null && util.isDigits(String.valueOf(status))) {
+            response.setStatus(util.str2int(String.valueOf(status)));
+        }
         for (Map.Entry<String, Object> kv : headers.entrySet()) {
             response.setHeader(kv.getKey(), kv.getValue());
         }
@@ -264,14 +266,27 @@ public class GraphExecutor extends GraphLambdaFunction {
         graphInstance.complete.set(true);
     }
 
-    private void executeSkill(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node, String parentSpanId) {
+    private void executeSkill(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node,
+                              String from, String parentSpanId) {
         if (po.exists(skill)) {
             var flowInstanceId = graphInstance.getFlowInstanceId();
             var nodeName = node.getAlias();
             var compositeId = flowInstanceId + "@" + nodeName;
-            po.send(new EventEnvelope().setTo(skill).setHeader(IN, flowInstanceId)
+            var event = new EventEnvelope().setTo(skill).setHeader(IN, flowInstanceId)
                     .setHeader(TYPE, EXECUTE).setHeader(NODE, nodeName)
-                    .setReplyTo(GraphExecutor.ROUTE).setCorrelationId(compositeId).setSpanId(parentSpanId));
+                    .setReplyTo(GraphExecutor.ROUTE).setCorrelationId(compositeId).setSpanId(parentSpanId);
+            if (from != null) {
+                event.setHeader(FROM, from);
+            }
+            // The walker is an event interceptor, so the business correlation-id is not
+            // auto-propagated by PostOffice. Stamp it from the graph's own model.cid so
+            // every skill (and its downstream calls) sees the business id in the
+            // my_correlation_id and application log context.
+            if (graphInstance.stateMachine.getElement(MODEL_CID) instanceof String businessCid
+                    && !businessCid.isBlank()) {
+                event.addTag(EventEmitter.BUSINESS_CID_TAG, businessCid.trim());
+            }
+            po.send(event);
         } else {
             sendError(po, graphInstance, "Skill " + skill + " does not exist", parentSpanId);
         }
@@ -280,12 +295,18 @@ public class GraphExecutor extends GraphLambdaFunction {
     private void nextOrJump(PostOffice po, GraphInstance graphInstance, SimpleNode node, String next, String parentSpanId) {
         if (!SINK.equals(next)) {
             var graph = graphInstance.graph;
-            if (NEXT.equals(next)) {
-                walkNext(po, graphInstance, node, parentSpanId);
+            if (next.startsWith(RESUME_PREFIX)) {
+                resumeTraversal(po, graphInstance, next.substring(RESUME_PREFIX.length()), parentSpanId);
+            } else if (NEXT.equals(next)) {
+                if (isSuspensible(node)) {
+                    walkToSuspendNode(po, graphInstance, node, parentSpanId);
+                } else {
+                    walkNext(po, graphInstance, node, parentSpanId, false);
+                }
             } else {
                 var nextNode = graph.findNodeByAlias(next);
                 if (nextNode != null) {
-                    walk(po, graphInstance, nextNode, parentSpanId);
+                    walk(po, graphInstance, nextNode, node.getAlias(), parentSpanId);
                 } else {
                     sendError(po, graphInstance, "Next node '" + next + "' does not exist", parentSpanId);
                 }
@@ -293,12 +314,42 @@ public class GraphExecutor extends GraphLambdaFunction {
         }
     }
 
-    private void walkNext(PostOffice po, GraphInstance graphInstance, SimpleNode node, String parentSpanId) {
+    private void walkToSuspendNode(PostOffice po, GraphInstance graphInstance, SimpleNode node, String parentSpanId) {
+        // the quality gate already rejected suspension on routing skills, a missing
+        // 'suspend' node and a mis-skilled one - a compiled model needs no re-check
+        // (GraphTraveler keeps these guards: playground drafts never pass the gate)
+        walk(po, graphInstance, graphInstance.graph.findNodeByAlias(SUSPEND), node.getAlias(), parentSpanId);
+    }
+
+    private void resumeTraversal(PostOffice po, GraphInstance graphInstance, String alias, String parentSpanId) {
+        var resumedNode = graphInstance.graph.findNodeByAlias(alias);
+        if (resumedNode == null) {
+            sendError(po, graphInstance, "Resumed node '" + alias + "' does not exist", parentSpanId);
+        } else {
+            // the suspension point already ran before suspension - do not re-execute it
+            graphInstance.nodeSeen.put(alias, true);
+            graphInstance.skillRun.put(alias, true);
+            walkNext(po, graphInstance, resumedNode, parentSpanId, true);
+        }
+    }
+
+    private void walkNext(PostOffice po, GraphInstance graphInstance, SimpleNode node,
+                          String parentSpanId, boolean afterResume) {
         if (!graphInstance.complete.get()) {
             var graph = graphInstance.graph;
             var nodes = graph.getForwardLinks(node.getAlias());
+            var deadEnd = true;
             for (SimpleNode next : nodes) {
-                walk(po, graphInstance, next, parentSpanId);
+                // a resumed traversal continues along the normal path, never back into suspension
+                if (afterResume && SUSPEND.equals(next.getAlias())) {
+                    continue;
+                }
+                deadEnd = false;
+                walk(po, graphInstance, next, node.getAlias(), parentSpanId);
+            }
+            if (afterResume && deadEnd) {
+                sendError(po, graphInstance, "Resumed node '" + node.getAlias() +
+                        "' has no forward path to continue", parentSpanId);
             }
         }
     }
@@ -307,23 +358,15 @@ public class GraphExecutor extends GraphLambdaFunction {
         if (graphId.startsWith("tutorial") && !isDevEnv) {
             throw new IllegalArgumentException("tutorial graph models not allowed");
         }
-        // graphs validated and converted at startup by CompileGraph are reused as-is to avoid
-        // re-parsing the JSON file and re-resolving deprecated syntax on every request
+        // deployed graph execution is served exclusively from the compiled registry:
+        // a model is executable only when it is listed in the graph manifest and
+        // passed the CompileGraph quality gate (the CompileFlows precedent) - a
+        // failed or unlisted graph answers 404 as if it does not exist
         var compiled = CompiledGraphs.getGraph(graphId);
-        if (compiled != null) {
-            return util.deepCopy(compiled);
+        if (compiled == null) {
+            throw new AppException(404, graphId + " not found");
         }
-        // use config reader to resolve environment variables
-        try {
-            var reader = new ConfigReader(getNormalizedPath(deployedGraphLocation, graphId));
-            return reader.getMap();
-        } catch (IllegalArgumentException e) {
-            if (e.getMessage().endsWith("not found")) {
-                throw new IllegalArgumentException(graphId + " not found");
-            } else {
-                throw e;
-            }
-        }
+        return util.deepCopy(compiled);
     }
 
     private void handleErrorResponse(PostOffice po, GraphInstance graphInstance, EventEnvelope response, String parentSpanId) {

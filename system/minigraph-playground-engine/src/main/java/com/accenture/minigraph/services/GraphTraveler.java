@@ -22,6 +22,9 @@ import com.accenture.minigraph.common.GraphLambdaFunction;
 import com.accenture.minigraph.models.GraphInstance;
 import com.accenture.minigraph.models.Visits;
 import com.accenture.minigraph.skills.GraphJoin;
+import com.accenture.minigraph.skills.GraphJs;
+import com.accenture.minigraph.skills.GraphMath;
+import com.accenture.minigraph.skills.GraphSuspend;
 import org.platformlambda.core.annotations.EventInterceptor;
 import org.platformlambda.core.annotations.OptionalService;
 import org.platformlambda.core.annotations.PreLoad;
@@ -30,6 +33,7 @@ import org.platformlambda.core.exception.AppException;
 import org.platformlambda.core.models.EventEnvelope;
 import org.platformlambda.core.models.SimpleNode;
 import org.platformlambda.core.serializers.SimpleMapper;
+import org.platformlambda.core.system.EventEmitter;
 import org.platformlambda.core.system.PostOffice;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +73,7 @@ public class GraphTraveler extends GraphLambdaFunction {
             graphInstance.setReplyTo(event.getReplyTo());
             graphInstance.nodeSeen.clear();
             graphInstance.skillRun.clear();
+            graphInstance.hits.clear();
             graphInstance.complete.set(false);
             graphInstance.resetStartTime();
             // clean output for idempotent behavior because the traveler may be invoked multiple times by the operator
@@ -79,6 +84,11 @@ public class GraphTraveler extends GraphLambdaFunction {
             var error = new EventEnvelope().setTo(event.getReplyTo()).setStatus(rc).setBody(e.getMessage())
                                                 .setCorrelationId(event.getCorrelationId());
             po.send(error);
+            // Uniform end-of-transmission even when the traversal fails before it
+            // starts (no graph instance yet, missing root/end) - no GraphInstance
+            // exists here, so emit the terminal line directly to the reply route.
+            po.send(new EventEnvelope().setTo(event.getReplyTo()).setStatus(400)
+                    .setBody("Graph traversal aborted").setCorrelationId(event.getCorrelationId()));
         }
     }
 
@@ -92,7 +102,7 @@ public class GraphTraveler extends GraphLambdaFunction {
         if (end == null) {
             throw new IllegalArgumentException("End node does not exist");
         }
-        walk(po, graphInstance, root);
+        walk(po, graphInstance, root, null);
     }
 
     private void handleSkillResponse(PostOffice po, EventEnvelope response) {
@@ -107,15 +117,14 @@ public class GraphTraveler extends GraphLambdaFunction {
             // Unrecoverable error from the node itself
             if (response.hasError()) {
                 if (target != null) {
-                    var eMap = getErrorMap(stateMachine.getElement(OUTPUT_BODY_NAMESPACE), target);
-                    stateMachine.setElement(OUTPUT_BODY_NAMESPACE, eMap);
+                    var eMap = getErrorMap(stateMachine.getElement(OUTPUT_BODY), target);
+                    stateMachine.setElement(OUTPUT_BODY, eMap);
                 }
                 handleErrorResponse(po, graphInstance, response);
                 return;
             }
             var graph = graphInstance.graph;
             var node = graph.findNodeByAlias(nodeName);
-            graphInstance.skillRun.put(nodeName, true);
             checkFrequency(po, graphInstance, nodeName);
             // advise user that the node with skill has been executed
             var skill = node.getProperty(SKILL);
@@ -126,13 +135,20 @@ public class GraphTraveler extends GraphLambdaFunction {
             // e.g. the HTTP response status code to the API fetcher >= 400
             var processStatus = stateMachine.getElement(nodeName + "." + STATUS);
             var resultError = stateMachine.getElement(nodeName + "." + ERROR);
+            // Mark the skill complete only when it did NOT fail (status + error set,
+            // e.g. an exception-routed fetcher): a join barrier consults skillRun,
+            // so a failed branch must not satisfy the barrier while it retries.
+            // GraphExecutor keeps identical semantics.
+            if (!(processStatus instanceof Integer && resultError != null)) {
+                graphInstance.skillRun.put(nodeName, true);
+            }
             var errorHandler = node.getProperty(EXCEPTION);
             if (processStatus instanceof Integer rc && resultError != null && errorHandler == null) {
                 var errorMap = getErrorMap(resultError, target);
                 var cid = graphInstance.getCorrelationId();
                 var error = new EventEnvelope().setTo(replyTo).setCorrelationId(cid).setBody(errorMap).setStatus(rc);
                 po.send(error);
-                sendError(po, graphInstance, "Graph traversal aborted");
+                emitAborted(po, graphInstance);
             } else if (!graphInstance.complete.get()) {
                 var next = String.valueOf(response.getBody());
                 decideNext(po, node, next, graphInstance);
@@ -141,7 +157,7 @@ public class GraphTraveler extends GraphLambdaFunction {
     }
 
     private void checkFrequency(PostOffice po, GraphInstance graphInstance, String nodeName) {
-        var frequency = graphInstance.hits.getOrDefault(nodeName, new Visits());
+        var frequency = graphInstance.hits.computeIfAbsent(nodeName, k -> new Visits());
         var now = System.currentTimeMillis();
         var last = frequency.lastVisit.get();
         if (now - last > getLoopInterval()) {
@@ -149,7 +165,6 @@ public class GraphTraveler extends GraphLambdaFunction {
             frequency.hits.set(0);
         }
         var total = frequency.hits.incrementAndGet();
-        graphInstance.hits.put(nodeName, frequency);
         if (total > getHighFrequency()) {
             log.error("Looping detected - {} hits in {} ms for {} in {}",
                     total, now - last, nodeName, graphInstance.graphId);
@@ -168,34 +183,39 @@ public class GraphTraveler extends GraphLambdaFunction {
         }
     }
 
-    private void walk(PostOffice po, GraphInstance graphInstance, SimpleNode node) {
+    private void walk(PostOffice po, GraphInstance graphInstance, SimpleNode node, String from) {
         if (!graphInstance.complete.get()) {
             var nodeName = node.getAlias();
             String skill = node.getProperty(SKILL) != null ? String.valueOf(node.getProperty(SKILL)) : null;
-            var seen = !GraphJoin.ROUTE.equals(skill) && graphInstance.nodeSeen.get(nodeName) != null;
+            // atomic mark-and-test: concurrent branches converging on the same
+            // non-join node must not dispatch it twice (a join always evaluates -
+            // its barrier logic owns the dedup)
+            var isJoin = GraphJoin.ROUTE.equals(skill);
+            var seen = graphInstance.nodeSeen.putIfAbsent(nodeName, true) != null;
             var out = graphInstance.getReplyTo();
-            if (!seen) {
-                graphInstance.nodeSeen.put(nodeName, true);
+            if (isJoin || !seen) {
                 po.send(new EventEnvelope().setTo(out).setBody("Walk to " + nodeName));
-                walkTo(po, skill, graphInstance, node);
+                walkTo(po, skill, graphInstance, node, from);
             }
         }
     }
 
-    private void walkTo(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node) {
+    private void walkTo(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node, String from) {
         var graph = graphInstance.graph;
         var endNode = graph.getEndNode();
         if (endNode.getId().equals(node.getId())) {
             if (skill != null) {
-                executeSkill(po, skill, graphInstance, node);
+                executeSkill(po, skill, graphInstance, node, from);
             } else {
                 executionComplete(po, graphInstance);
             }
         } else {
             if (skill != null) {
-                executeSkill(po, skill, graphInstance, node);
+                executeSkill(po, skill, graphInstance, node, from);
+            } else if (isSuspensible(node)) {
+                walkToSuspendNode(po, graphInstance, node);
             } else {
-                walkNext(po, graphInstance, node);
+                walkNext(po, graphInstance, node, false);
             }
         }
     }
@@ -222,14 +242,23 @@ public class GraphTraveler extends GraphLambdaFunction {
         po.send(new EventEnvelope().setTo(out).setBody("Graph traversal completed in " + elapsed + " ms"));
     }
 
-    private void executeSkill(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node) {
+    private void executeSkill(PostOffice po, String skill, GraphInstance graphInstance, SimpleNode node, String from) {
         if (po.exists(skill)) {
             var wsInstanceId = graphInstance.getWsInstance();
             var nodeName = node.getAlias();
             var compositeId = wsInstanceId + "@" + nodeName;
-            po.send(new EventEnvelope().setTo(skill).setHeader(IN, wsInstanceId)
+            var event = new EventEnvelope().setTo(skill).setHeader(IN, wsInstanceId)
                     .setHeader(TYPE, EXECUTE).setHeader(NODE, nodeName)
-                    .setReplyTo(GraphTraveler.ROUTE).setCorrelationId(compositeId));
+                    .setReplyTo(GraphTraveler.ROUTE).setCorrelationId(compositeId);
+            if (from != null) {
+                event.setHeader(FROM, from);
+            }
+            // same business correlation-id propagation as GraphExecutor
+            if (graphInstance.stateMachine.getElement(MODEL_CID) instanceof String businessCid
+                    && !businessCid.isBlank()) {
+                event.addTag(EventEmitter.BUSINESS_CID_TAG, businessCid.trim());
+            }
+            po.send(event);
         } else {
             sendError(po, graphInstance, "Skill " + skill + " does not exist");
         }
@@ -238,12 +267,18 @@ public class GraphTraveler extends GraphLambdaFunction {
     private void nextOrJump(PostOffice po, GraphInstance graphInstance, SimpleNode node, String next) {
         if (!SINK.equals(next)) {
             var graph = graphInstance.graph;
-            if (NEXT.equals(next)) {
-                walkNext(po, graphInstance, node);
+            if (next.startsWith(RESUME_PREFIX)) {
+                resumeTraversal(po, graphInstance, next.substring(RESUME_PREFIX.length()));
+            } else if (NEXT.equals(next)) {
+                if (isSuspensible(node)) {
+                    walkToSuspendNode(po, graphInstance, node);
+                } else {
+                    walkNext(po, graphInstance, node, false);
+                }
             } else {
                 var nextNode = graph.findNodeByAlias(next);
                 if (nextNode != null) {
-                    walk(po, graphInstance, nextNode);
+                    walk(po, graphInstance, nextNode, node.getAlias());
                 } else {
                     sendError(po, graphInstance, "Next node '" + next + "' does not exist");
                 }
@@ -251,12 +286,52 @@ public class GraphTraveler extends GraphLambdaFunction {
         }
     }
 
-    private void walkNext(PostOffice po, GraphInstance graphInstance, SimpleNode node) {
+    private void walkToSuspendNode(PostOffice po, GraphInstance graphInstance, SimpleNode node) {
+        var skill = node.getProperty(SKILL);
+        if (GraphMath.ROUTE.equals(skill) || GraphJs.ROUTE.equals(skill)) {
+            sendError(po, graphInstance, "Node '" + node.getAlias() +
+                    "' cannot use 'suspend=true' with skill " + skill);
+            return;
+        }
+        var suspendNode = graphInstance.graph.findNodeByAlias(SUSPEND);
+        if (suspendNode == null) {
+            sendError(po, graphInstance, "Node '" + node.getAlias() +
+                    "' is suspensible but the graph has no '" + SUSPEND + "' node");
+        } else if (!GraphSuspend.ROUTE.equals(suspendNode.getProperty(SKILL))) {
+            sendError(po, graphInstance, "The '" + SUSPEND + "' node must use skill " + GraphSuspend.ROUTE);
+        } else {
+            walk(po, graphInstance, suspendNode, node.getAlias());
+        }
+    }
+
+    private void resumeTraversal(PostOffice po, GraphInstance graphInstance, String alias) {
+        var resumedNode = graphInstance.graph.findNodeByAlias(alias);
+        if (resumedNode == null) {
+            sendError(po, graphInstance, "Resumed node '" + alias + "' does not exist");
+        } else {
+            // the suspension point already ran before suspension - do not re-execute it
+            graphInstance.nodeSeen.put(alias, true);
+            graphInstance.skillRun.put(alias, true);
+            walkNext(po, graphInstance, resumedNode, true);
+        }
+    }
+
+    private void walkNext(PostOffice po, GraphInstance graphInstance, SimpleNode node, boolean afterResume) {
         if (!graphInstance.complete.get()) {
             var graph = graphInstance.graph;
             var nodes = graph.getForwardLinks(node.getAlias());
+            var deadEnd = true;
             for (SimpleNode next : nodes) {
-                walk(po, graphInstance, next);
+                // a resumed traversal continues along the normal path, never back into suspension
+                if (afterResume && SUSPEND.equals(next.getAlias())) {
+                    continue;
+                }
+                deadEnd = false;
+                walk(po, graphInstance, next, node.getAlias());
+            }
+            if (afterResume && deadEnd) {
+                sendError(po, graphInstance, "Resumed node '" + node.getAlias() +
+                        "' has no forward path to continue");
             }
         }
     }
@@ -266,13 +341,33 @@ public class GraphTraveler extends GraphLambdaFunction {
         var error = new EventEnvelope().setTo(out).setCorrelationId(graphInstance.getCorrelationId())
                                         .setBody(response.getBody()).setStatus(response.getStatus());
         po.send(error);
-        sendError(po, graphInstance, "Graph traversal aborted");
+        emitAborted(po, graphInstance);
     }
 
+    /**
+     * Canonical failure terminal — the mirror of the success terminal in
+     * {@code executionComplete}. Marks the traversal complete and emits the single
+     * end-of-transmission line the synchronous companion endpoint drains on, so
+     * <b>every</b> {@code run} finishes with either "Graph traversal completed in N ms"
+     * or "Graph traversal aborted" — a deterministic signal, never a timeout.
+     */
+    private void emitAborted(PostOffice po, GraphInstance graphInstance) {
+        graphInstance.complete.set(true);
+        po.send(new EventEnvelope().setTo(graphInstance.getReplyTo())
+                .setCorrelationId(graphInstance.getCorrelationId())
+                .setBody("Graph traversal aborted").setStatus(400));
+    }
+
+    /**
+     * Emit a specific failure reason and then the canonical {@link #emitAborted}
+     * terminal, so the human/companion sees <i>why</i> and any watcher (the sync
+     * endpoint included) still gets the uniform end-of-transmission line last.
+     */
     private void sendError(PostOffice po, GraphInstance graphInstance, String message) {
         graphInstance.complete.set(true);
         var error = new EventEnvelope().setTo(graphInstance.getReplyTo())
                             .setCorrelationId(graphInstance.getCorrelationId()).setBody(message).setStatus(400);
         po.send(error);
+        emitAborted(po, graphInstance);
     }
 }

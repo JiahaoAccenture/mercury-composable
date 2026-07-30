@@ -108,6 +108,11 @@ public class KafkaFlowAdapter implements AutoCloseable {
     private static final String SCHEMA = "schema";
     private static final String SCHEMA_ENABLED_FLAT = "schema.enabled";
     private static final String ENABLED = "enabled";
+    // Optional per-binding overrides of the global kafka.trace.id.header / kafka.correlation.id.header
+    // / kafka.traceparent.header, for impedance matching with an upstream that uses its own header convention.
+    private static final String TRACE_ID_HEADER_FLAT = "trace.id.header";
+    private static final String CORRELATION_ID_HEADER_FLAT = "correlation.id.header";
+    private static final String TRACEPARENT_HEADER_FLAT = "traceparent.header";
     private static final String DLQ_TOPIC = "dlq-topic";
     private static final String AUTO_COMMIT = "auto-commit";
     private static final String MAX_POLL_RECORDS = "max-poll-records";
@@ -117,10 +122,19 @@ public class KafkaFlowAdapter implements AutoCloseable {
 
     private final List<KafkaFlowConsumer> consumers = new ArrayList<>();
     private final Properties consumerProps;
+    // the registry-url application property named in error messages (for accurate diagnostics) -
+    // twin-kafka passes its secondary key so operators are pointed at the right setting
+    private final String registryUrlKey;
 
     public KafkaFlowAdapter(Properties consumerProps, ConfigReader config, long dlqTimeout,
                             RetryPolicy retryPolicy, SchemaCodec schemaCodec) {
+        this(consumerProps, config, dlqTimeout, retryPolicy, schemaCodec, "schema.registry.url");
+    }
+
+    public KafkaFlowAdapter(Properties consumerProps, ConfigReader config, long dlqTimeout,
+                            RetryPolicy retryPolicy, SchemaCodec schemaCodec, String registryUrlKey) {
         this.consumerProps = consumerProps;
+        this.registryUrlKey = registryUrlKey;
         Object entries = config.get(CONSUMER);
         if (!(entries instanceof List<?> list) || list.isEmpty()) {
             throw new IllegalArgumentException("kafka-flow-adapter config must contain a non-empty 'consumer' list");
@@ -165,16 +179,43 @@ public class KafkaFlowAdapter implements AutoCloseable {
         }
         if (schemaEnabled && schemaCodec == null) {
             throw new IllegalArgumentException("consumer[" + i + "] (" + label + ") sets "
-                    + "schema.enabled but 'schema.registry.url' is not configured");
+                    + "schema.enabled but '" + registryUrlKey + "' is not configured");
         }
-        logBinding(label, flowId, groupId, partition, schemaEnabled, dlqTopic, autoCommit);
         KafkaConsumerBinding.Builder builder = KafkaConsumerBinding.builder()
                 .flowId(flowId).groupId(groupId).partition(partition).schemaEnabled(schemaEnabled)
-                .dlqTopic(dlqTopic).autoCommit(autoCommit).maxPollRecords(maxPollRecords);
+                .dlqTopic(dlqTopic).autoCommit(autoCommit).maxPollRecords(maxPollRecords)
+                .traceIdHeader(nestedText(entry, TRACE_ID_HEADER_FLAT))
+                .correlationIdHeader(nestedText(entry, CORRELATION_ID_HEADER_FLAT))
+                .traceparentHeader(nestedText(entry, TRACEPARENT_HEADER_FLAT));
         KafkaConsumerBinding binding = (topicPattern != null ? builder.topicPattern(topicPattern)
                 : builder.topic(topic)).build();
+        logBinding(label, binding);
         return new KafkaFlowConsumer(newConsumer(binding), binding, dlqTimeout, retryPolicy,
                 schemaEnabled ? schemaCodec : null);
+    }
+
+    /**
+     * Read an optional dotted key from a binding entry. ConfigReader normalizes dotted keys into nested
+     * maps (e.g. {@code trace.id.header} becomes {@code {trace: {id: {header: value}}}}), so this walks
+     * the nested form and also accepts a flat key (for a map authored programmatically). Visible for testing.
+     *
+     * @param entry   the consumer-binding entry
+     * @param flatKey the dotted key, e.g. {@code trace.id.header}
+     * @return the value as text, or {@code null} when absent
+     */
+    static String nestedText(Map<?, ?> entry, String flatKey) {
+        Object direct = entry.get(flatKey);
+        if (direct != null) {
+            return text(direct);
+        }
+        Object node = entry;
+        for (String segment : flatKey.split("\\.")) {
+            if (!(node instanceof Map<?, ?> map)) {
+                return null;
+            }
+            node = map.get(segment);
+        }
+        return text(node);
     }
 
     /** Validate the topic/topic-pattern selector (exactly one is set, valid regex) and return a display label. */
@@ -198,13 +239,18 @@ public class KafkaFlowAdapter implements AutoCloseable {
     }
 
     /** Log a one-line summary of a resolved consumer binding. */
-    private void logBinding(String label, String flowId, String groupId, Integer partition,
-                            boolean schemaEnabled, String dlqTopic, boolean autoCommit) {
-        log.info("Kafka flow adapter binding: {} -> flow '{}' (consumer group '{}'{}{}{}{})",
-                label, flowId, groupId, partition != null ? ", pinned to partition " + partition : "",
-                schemaEnabled ? ", schema decode on" : "",
-                dlqTopic != null ? ", dlq-topic '" + dlqTopic + "'" : "",
-                autoCommit ? ", auto-commit on" : "");
+    private void logBinding(String label, KafkaConsumerBinding binding) {
+        log.info("Kafka flow adapter binding: {} -> flow '{}' (consumer group '{}'{}{}{}{}{}{}{})",
+                label, binding.flowId(), binding.groupId(),
+                binding.partition() != null ? ", pinned to partition " + binding.partition() : "",
+                binding.schemaEnabled() ? ", schema decode on" : "",
+                binding.dlqTopic() != null ? ", dlq-topic '" + binding.dlqTopic() + "'" : "",
+                binding.autoCommit() ? ", auto-commit on" : "",
+                binding.traceIdHeader() != null ? ", trace-id header '" + binding.traceIdHeader() + "'" : "",
+                binding.correlationIdHeader() != null
+                        ? ", correlation-id header '" + binding.correlationIdHeader() + "'" : "",
+                binding.traceparentHeader() != null
+                        ? ", traceparent header '" + binding.traceparentHeader() + "'" : "");
     }
 
     /**
@@ -217,7 +263,7 @@ public class KafkaFlowAdapter implements AutoCloseable {
         if (dlqTopic == null) {
             return null;
         }
-        if (topic != null && dlqTopic.equals(topic)) {
+        if (dlqTopic.equals(topic)) {
             throw new IllegalArgumentException("consumer[" + i + "] (" + label
                     + ") 'dlq-topic' must not equal the source 'topic'");
         }

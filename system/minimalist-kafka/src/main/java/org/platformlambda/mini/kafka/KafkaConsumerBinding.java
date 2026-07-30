@@ -20,7 +20,7 @@ package org.platformlambda.mini.kafka;
 
 /**
  * One validated {@code consumer[]} entry from {@code kafka-flow-adapter.yaml}, resolved by
- * {@link KafkaFlowAdapter#buildConsumer} and handed to {@link KafkaFlowConsumer}. Built via
+ * {@code KafkaFlowAdapter.buildConsumer} and handed to {@link KafkaFlowConsumer}. Built via
  * {@link #builder()} rather than a wide constructor - a 9-parameter constructor trips static-analysis
  * parameter-count rules regardless of how many callers there are, whereas a builder's setters take one
  * argument each.
@@ -36,6 +36,9 @@ public final class KafkaConsumerBinding {
     private final String dlqTopic;
     private final boolean autoCommit;
     private final Integer maxPollRecords;
+    private final String traceIdHeader;
+    private final String correlationIdHeader;
+    private final String traceparentHeader;
 
     private KafkaConsumerBinding(Builder b) {
         this.topicOrPattern = b.topicOrPattern;
@@ -47,6 +50,9 @@ public final class KafkaConsumerBinding {
         this.dlqTopic = b.dlqTopic;
         this.autoCommit = b.autoCommit;
         this.maxPollRecords = b.maxPollRecords;
+        this.traceIdHeader = b.traceIdHeader;
+        this.correlationIdHeader = b.correlationIdHeader;
+        this.traceparentHeader = b.traceparentHeader;
     }
 
     /** Literal topic name, or the regex pattern text when {@link #isPattern()} is true. */
@@ -91,6 +97,33 @@ public final class KafkaConsumerBinding {
         return maxPollRecords;
     }
 
+    /**
+     * Per-binding inbound trace-id header override ({@code trace.id.header}), or {@code null} to use the
+     * global {@code kafka.trace.id.header}. Impedance matching for an upstream that does not send a W3C
+     * {@code traceparent} - a well-formed traceparent always takes precedence.
+     */
+    public String traceIdHeader() {
+        return traceIdHeader;
+    }
+
+    /**
+     * Per-binding inbound business correlation-id header override ({@code correlation.id.header}), or
+     * {@code null} to use the global {@code kafka.correlation.id.header} (default {@code cid}).
+     */
+    public String correlationIdHeader() {
+        return correlationIdHeader;
+    }
+
+    /**
+     * Per-binding inbound traceparent header override ({@code traceparent.header}), or {@code null} to
+     * use the global {@code kafka.traceparent.header} (default {@code traceparent}). Impedance matching
+     * for an upstream that carries W3C trace context under its own header name - the standard
+     * {@code traceparent} always wins, and the custom name is read only when the standard is absent.
+     */
+    public String traceparentHeader() {
+        return traceparentHeader;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -106,6 +139,9 @@ public final class KafkaConsumerBinding {
         private String dlqTopic;
         private boolean autoCommit;
         private Integer maxPollRecords;
+        private String traceIdHeader;
+        private String correlationIdHeader;
+        private String traceparentHeader;
 
         private Builder() {
         }
@@ -154,6 +190,21 @@ public final class KafkaConsumerBinding {
 
         public Builder maxPollRecords(Integer maxPollRecords) {
             this.maxPollRecords = maxPollRecords;
+            return this;
+        }
+
+        public Builder traceIdHeader(String traceIdHeader) {
+            this.traceIdHeader = traceIdHeader;
+            return this;
+        }
+
+        public Builder correlationIdHeader(String correlationIdHeader) {
+            this.correlationIdHeader = correlationIdHeader;
+            return this;
+        }
+
+        public Builder traceparentHeader(String traceparentHeader) {
+            this.traceparentHeader = traceparentHeader;
             return this;
         }
 

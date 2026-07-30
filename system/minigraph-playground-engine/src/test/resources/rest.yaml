@@ -77,6 +77,14 @@ rest:
     headers: header_1
     tracing: true
 
+  - service: 'post.companion.command.sync'
+    methods: ['POST']
+    url: '/api/companion/{id}/sync'
+    timeout: 30s
+    cors: cors_1
+    headers: header_1
+    tracing: true
+
   # MOCK endpoints
 
   - service: 'mock.mdm.profile'
@@ -98,6 +106,14 @@ rest:
   - service: 'mock.account.details'
     methods: ['POST']
     url: '/api/account/details'
+    timeout: 10s
+    cors: cors_1
+    headers: header_1
+    tracing: true
+
+  - service: 'mock.cache.counter'
+    methods: ['GET']
+    url: '/api/cache/counter/{id}'
     timeout: 10s
     cors: cors_1
     headers: header_1

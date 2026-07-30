@@ -65,6 +65,26 @@ public class CompileFlows implements EntryPoint {
     private static final String MODEL_PARENT = "model.parent.";
     private static final String MODEL_ROOT = "model.root.";
     private static final String MODEL_NAMESPACE = "model.";
+    /**
+     * Reserved state-machine keys that a data mapping must never overwrite:
+     * <ul>
+     * <li>the READ-only metadata seeded into each flow instance by the engine (see FlowInstance) -
+     *     model.cid, model.instance, model.flow, model.ttl and model.trace. A corrupted model.cid,
+     *     for example, would propagate to downstream systems through any later
+     *     'model.cid -> ...' mapping.</li>
+     * <li>the model.none null constant - it works because the 'none' key is never set, so a write
+     *     would silently turn every later 'model.none -> X' clear-operation into a value copy.</li>
+     * <li>the model.run flag - engine-managed flow metadata written only by the knowledge
+     *     graph's graph.resume skill ('resume' | 'fresh'); application logic reads it to react
+     *     to a resumed-vs-fresh condition, so an overwrite would lie to that logic.</li>
+     * </ul>
+     * The model.parent and model.root keys are protected as whole namespaces by
+     * DataMappingHelper.validModel; writing beneath them (model.parent.*) is the shared-state
+     * mechanism and stays allowed.
+     */
+    private static final List<String> RESERVED_MODEL_KEYS =
+            List.of("model.cid", "model.instance", "model.flow", "model.ttl", "model.trace",
+                    "model.none", "model.parent", "model.root", "model.run");
     private static final String NEGATE_MODEL = "!model.";
     private static final String EXT_NAMESPACE = "ext:";
     private static final String TEXT_TYPE = "text(";
@@ -167,7 +187,7 @@ public class CompileFlows implements EntryPoint {
          * Flow description is enforced at compile time for documentation purpose.
          * It is not used in flow processing.
          */
-        if (id instanceof String flowId && description instanceof String
+        if (id instanceof String flowId && description instanceof String flowDescription
                 && timeToLive instanceof String ttl && firstTask instanceof String start) {
             if (Flows.flowExists(flowId)) {
                 throw new IllegalArgumentException(String.format("Flow '%s' already exists", flowId));
@@ -176,7 +196,7 @@ public class CompileFlows implements EntryPoint {
             // minimum 1 second for TTL
             long ttlSeconds = Math.max(1, util.getDurationInSeconds(ttl));
             String extState = ext instanceof String es? es : null;
-            Flow entry = new Flow(flowId, start, extState, ttlSeconds * 1000L, unhandledException);
+            Flow entry = new Flow(flowId, flowDescription, start, extState, ttlSeconds * 1000L, unhandledException);
             Object taskList = reader.get(TASKS);
             int taskCount = taskList instanceof List<?> tList? tList.size() : 0;
             if (taskCount == 0) {
@@ -233,28 +253,38 @@ public class CompileFlows implements EntryPoint {
     private boolean validInputMapping(String name, List<String> inputList, Task task, FlowConfigMetadata md) {
         List<String> filteredInputMapping = filterDataMapping(inputList);
         for (String raw : filteredInputMapping) {
-            // convert deprecated "simple type matching" syntax to "simple plugin" syntax
-            String line = converter.convert(raw);
-            if (!line.equals(raw)) {
-                log.warn("Deprecated input syntax in task {} of {} - '{}' converted to '{}'",
-                        md.uniqueTaskName, name, raw, line);
-            }
-            if (helper.validInput(line)) {
-                int sep = line.lastIndexOf(MAP_TO);
-                String rhs = line.substring(sep + 2).trim();
-                if (rhs.startsWith(INPUT_NAMESPACE) || rhs.equals(INPUT)) {
-                    log.warn("Task {} in {} uses input namespace in right-hand-side - {}",
-                            md.uniqueTaskName, name, line);
-                }
-                task.input.add(line);
-                if (line.contains(MODEL_PARENT) || line.contains(MODEL_ROOT)) {
-                    task.enableInputParentRef();
-                }
-            } else {
-                log.error("Skip invalid task {} in {} that has invalid input mapping - {}",
-                        md.uniqueTaskName, name, line);
+            if (!addValidatedInputEntry(name, raw, task, md)) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    /** Validate one input data mapping entry and add it to the task (false = the task must be skipped). */
+    private boolean addValidatedInputEntry(String name, String raw, Task task, FlowConfigMetadata md) {
+        // convert deprecated "simple type matching" syntax to "simple plugin" syntax
+        String line = converter.convert(raw);
+        if (!line.equals(raw)) {
+            log.warn("Deprecated input syntax in task {} of {} - '{}' converted to '{}'",
+                    md.uniqueTaskName, name, raw, line);
+        }
+        if (!helper.validInput(line)) {
+            log.error("Skip invalid task {} in {} that has invalid input mapping - {}",
+                    md.uniqueTaskName, name, line);
+            return false;
+        }
+        int sep = line.lastIndexOf(MAP_TO);
+        String rhs = line.substring(sep + 2).trim();
+        if (rhs.startsWith(INPUT_NAMESPACE) || rhs.equals(INPUT)) {
+            log.warn("Task {} in {} uses input namespace in right-hand-side - {}",
+                    md.uniqueTaskName, name, line);
+        }
+        if (rejectedReservedTarget(INPUT, rhs, name, md, line)) {
+            return false;
+        }
+        task.input.add(line);
+        if (line.contains(MODEL_PARENT) || line.contains(MODEL_ROOT)) {
+            task.enableInputParentRef();
         }
         return true;
     }
@@ -270,6 +300,10 @@ public class CompileFlows implements EntryPoint {
                         md.uniqueTaskName, name, raw, line);
             }
             if (helper.validOutput(line, isDecisionTask)) {
+                String rhs = line.substring(line.lastIndexOf(MAP_TO) + 2).trim();
+                if (rejectedReservedTarget(OUTPUT, rhs, name, md, line)) {
+                    return false;
+                }
                 task.output.add(line);
                 if (line.contains(MODEL_PARENT) || line.contains(MODEL_ROOT)) {
                     task.enableOutputParentRef();
@@ -285,6 +319,46 @@ public class CompileFlows implements EntryPoint {
             return false;
         }
         return true;
+    }
+
+    /** Log and reject a data mapping entry whose target overwrites a reserved state-machine key. */
+    private boolean rejectedReservedTarget(String direction, String rhs, String name,
+                                           FlowConfigMetadata md, String line) {
+        String reserved = reservedModelKeyViolation(rhs);
+        if (reserved != null) {
+            log.error("Skip invalid task ({}) {} in {} that overwrites the reserved state-machine key '{}' - {}",
+                    direction, md.uniqueTaskName, name, reserved, line);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Detect a data mapping target (RHS) that would overwrite a reserved key of the flow
+     * instance's state machine (the READ-only metadata or the model.none null constant).
+     * Exact matches are rejected for all reserved keys; nested writes (e.g. {@code model.cid.x}
+     * or {@code model.cid[0]}) are also rejected for the scalar keys because they would replace
+     * the scalar with a map or list. Nested writes under {@code model.parent} / {@code model.root}
+     * remain valid - that is the shared-state mechanism.
+     * <p>
+     * Package-private static so TaskExecutor can re-run the same check on a dynamic RHS
+     * (e.g. {@code model.{model.pointer}}) after runtime substitution, which the compile-time
+     * validation cannot see.
+     *
+     * @param rhs the right-hand-side of a data mapping
+     * @return the reserved key that would be overwritten, or null if the target is acceptable
+     */
+    static String reservedModelKeyViolation(String rhs) {
+        for (String reserved : RESERVED_MODEL_KEYS) {
+            if (rhs.equals(reserved)) {
+                return reserved;
+            }
+            boolean sharedNamespace = reserved.equals("model.parent") || reserved.equals("model.root");
+            if (!sharedNamespace && (rhs.startsWith(reserved + ".") || rhs.startsWith(reserved + "["))) {
+                return reserved;
+            }
+        }
+        return null;
     }
 
     private void finalizeEntry(Flow entry) {

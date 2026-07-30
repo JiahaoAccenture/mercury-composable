@@ -20,8 +20,8 @@ keywords: [observability, distributed tracing, opentelemetry, otlp, telemetry, w
 > - **Built-in** — distributed tracing is part of the platform; you turn it on per endpoint/flow and the
 >   spans propagate without code.
 > - **For** developers and operators wiring Mercury to Dynatrace, Splunk, Jaeger, Tempo, or an OpenTelemetry Collector.
-> - **Logs too** — an opt-in [application log context](#log-context) stamps the same correlation/trace ids (plus your
->   own key-values) into structured log lines, so logs and spans join up in your backend.
+> - **Logs too** — a default-on [application log context](#log-context) stamps the same correlation/trace ids (plus
+>   your own key-values) into structured log lines, so logs and spans join up in your backend.
 
 In an event-driven, composable system a single request fans out across **decoupled** functions, flows, and graph
 nodes that never call each other directly. Observability is therefore not optional — it is the only way to see the
@@ -88,7 +88,7 @@ standard `traceparent` header:
 
 The `X-Trace-Id` header carries the trace ID for callers not yet on W3C Trace Context. The framework does not
 echo the trace ID back to the HTTP client. (The correlation-id — a separate concern — is documented in
-[Reserved Names & Headers](reserved-names-and-headers.md#correlation-id-propagation).)
+[Reserved Names & Headers](reserved-names-and-headers.md#reserved-http-header-names).)
 
 > **Let the framework manage trace headers — don't set them yourself.** Inside a traced flow or function the
 > platform injects `X-Trace-Id` and `traceparent` on every outbound HTTP call from the current trace context,
@@ -97,6 +97,102 @@ echo the trace ID back to the HTTP client. (The correlation-id — a separate co
 > endpoint with `tracing: false`, or a call made outside a trace): there a trace header you set passes through
 > untouched — the intended escape hatch for handing a trace context to a third-party system, or for
 > unit-testing an external endpoint with full control over its request headers.
+
+## Header impedance matching (trace-id and correlation-id) {#impedance-matching}
+
+Not every caller names its headers the way this framework does. An enterprise gateway may have standardized on
+its own trace header long before W3C Trace Context; a legacy Kafka producer may stamp `X-Correlation-ID`; and
+two systems bridged by one application rarely agree with each other. Rather than forcing every party to rename,
+the platform **matches the impedance at the edge**: the header *names* are configuration, while everything
+downstream keeps working with the same two ids —
+
+- the **trace id** (with its W3C `traceparent` context) drives the distributed tracing on this page;
+- the **business correlation-id** is a separate concern — captured at the edge, preserved as the flow's
+  `model.cid`, and exposed to every function via `PostOffice.getMyCorrelationId()`
+  (see [Reserved Names & Headers](reserved-names-and-headers.md#reserved-http-header-names)).
+
+### The configurable names {#impedance-config}
+
+Global defaults in `application.properties`:
+
+| Key | Default | Where it applies |
+|:----|:--------|:-----------------|
+| `http.trace.id.header` | `X-Trace-Id` | REST automation inbound (when no `traceparent` is present) and the async HTTP client outbound |
+| `http.correlation.id.header` | `X-Correlation-Id` | HTTP edge capture inbound; async HTTP client outbound |
+| `http.traceparent.header` | `traceparent` | The header carrying the full W3C trace context; REST automation inbound (standard `traceparent` first, custom name only when the standard is absent) and HTTP client / Event-over-HTTP outbound (stamped under **both** names) |
+| `kafka.trace.id.header` | *(unset)* | Kafka Flow Adapter inbound fallback; `simple.kafka.notification` outbound, stamped alongside `traceparent` |
+| `kafka.correlation.id.header` | `cid` | Kafka Flow Adapter inbound; `simple.kafka.notification` outbound |
+| `kafka.traceparent.header` | `traceparent` | Kafka twin of `http.traceparent.header`: adapter inbound (standard first, custom name only when the standard is absent); notification outbound (stamped under **both** names) |
+
+Per-entry overrides, for a single application that faces callers with different conventions:
+
+- a **rest.yaml** endpoint entry accepts `trace.id.header` / `correlation.id.header` / `traceparent.header`;
+- a **kafka-flow-adapter.yaml** consumer binding accepts the same three keys
+  ([Minimalist Kafka](minimalist-kafka.md#adapter-yaml));
+- [twin-kafka](twin-kafka.md) adds `secondary.kafka.trace.id.header` / `secondary.kafka.correlation.id.header` /
+  `secondary.kafka.traceparent.header` globals when the second Kafka cluster follows its own convention
+  (each falls back to its primary `kafka.*` setting when unset).
+
+**Precedence:** per-entry override > `application.properties` global > built-in default. A well-formed W3C
+`traceparent` **always** takes precedence for the trace id, whatever the header naming — so adopting these
+overrides never breaks OpenTelemetry-compliant callers. The full key reference lives in the
+[Configuration Reference](configuration-reference.md#observability).
+
+> **Legacy conflation is supported.** Pointing the trace-id name at the correlation-id header
+> (`http.trace.id.header=X-Correlation-Id`) is a valid backward-compatibility setup for an estate whose
+> gateway only passes that one header. The edge keeps the two ids consistent: a supplied shared header
+> feeds **both** ids, and when the shared header is absent the edge resolves **one** id for both — from
+> the inbound `traceparent` when present, otherwise a single generated id — so the outgoing
+> `traceparent` and the shared header always carry the same trace id. Prefer migrating the gateway to
+> pass `traceparent` (and `X-Trace-Id`), then retiring the conflation.
+
+> **The standard W3C `traceparent` is our position — use it.** It is the header OpenTelemetry
+> and the wider observability ecosystem interoperate on, and the framework implements it as the
+> default with zero configuration. The optional `traceparent.header` family below exists for
+> **backward compatibility with legacy systems only**; departure from the standard is
+> discouraged, because a renamed carrier is invisible to OpenTelemetry SDKs, service meshes and
+> APM agents, and every participant must be configured alike. Treat a custom name as a
+> temporary bridge and plan the migration back to the standard header.
+>
+> Within that constraint, **a renamed traceparent beats conflation for the gateway case.** The
+> conflation above carries only the trace **id**, so spans in different applications can be
+> stitched by id but not **parented** across the hop. Renaming the traceparent carrier
+> (`http.traceparent.header=X-Trace-Context`) moves the *full* W3C context — trace-id, parent
+> span-id and flags — through the gateway under an allow-listed name, so cross-application span
+> parenting survives. Outbound calls stamp the same value under both the custom and the
+> standard name; inbound, the **standard `traceparent` always wins** and the custom name is
+> read only when the standard is absent — a well-formed standard traceparent means the caller
+> already speaks W3C/OTel, so a residual proprietary header alongside it is safely ignored.
+> The durable fix is always the gateway allow-list — retire the custom name once it lands.
+
+```yaml
+# rest.yaml - one endpoint serves a legacy caller that sends its own header names
+  - service: "legacy.orders"
+    methods: ['POST']
+    url: "/api/legacy/orders"
+    timeout: 15s
+    tracing: true
+    trace.id.header: "X-Legacy-Trace"
+    correlation.id.header: "X-Legacy-Cid"
+```
+
+### Bridging two conventions {#impedance-bridge}
+
+When one application connects two systems that each own a correlation-id convention (for example a
+dual-cluster Kafka bridge), keep each system's header name strictly on its own side:
+
+1. the **inbound** adapter binding declares that system's `correlation.id.header`, so the id lands in
+   `model.cid`;
+2. the **flow** maps it back out under the *next* system's name — `'model.cid -> header.X-Their-Header'` —
+   on the outbound data mapping;
+3. neither system ever sees the other's header name: the id *value* is what crosses the bridge, and the trace
+   context (`traceparent`) rides alongside automatically, keeping one continuous distributed trace end to end.
+
+The [twin-kafka guide](twin-kafka.md) covers this pattern across two Kafka clusters, and the
+[`twin-kafka-demo`](https://github.com/Accenture/mercury-composable/tree/main/examples/twin-kafka-demo) worked
+example runs it end to end: an on-prem system's `X-Correlation-Id` and a cloud system's
+`X-Cloud-Correlation-Id` carry the same id through one bridged transaction, with each header name confined to
+its own cluster.
 
 ## Exporting telemetry {#export}
 
@@ -167,12 +263,21 @@ It deliberately **avoids the ThreadLocal / Log4j MDC** pattern (heavy for a virt
 rides the same per-request mechanism as the trace itself, keyed to the worker thread and torn down when the
 function returns.
 
-### Turning it on {#log-context-enable}
+### On by default {#log-context-enable}
 
-The feature is **opt-in** and activates only when an optional `app-log-context.yaml` is on the classpath
-(`src/main/resources/`). It applies to the two **structured JSON appenders** — select one via the log4j2
+The feature is **on by default**: platform-core ships a built-in `default-log-context.yaml` that emits the
+standard trace context (`cid`, `traceId`, `tracePath`, `spanId`, `parentSpanId`, `service`, `timestamp`) on
+every structured log line. You can adjust it in two ways:
+
+- **Customize** — provide your own `app-log-context.yaml` on the classpath (`src/main/resources/`); it
+  replaces the built-in template entirely.
+- **Opt out** — set `app.log.context=false` in `application.properties`.
+
+It applies to the two **structured JSON appenders** — select one via the log4j2
 configuration (`log4j2-json.xml` for pretty output, `log4j2-compact.xml` for single-line); the plain `Console`
 appender is unaffected.
+
+A custom template looks like this:
 
 ```yaml
 # src/main/resources/app-log-context.yaml
@@ -199,6 +304,14 @@ The **left side** is the output key (your choice). The **right side** is one of 
 The reserved tokens are `$cid`, `$traceId`, `$tracePath`, `$spanId`, `$parentSpanId`, `$service` (the current
 function's route), and `$utc` (the log line's UTC timestamp). A token (or env value) that resolves to nothing is
 **omitted** from the block rather than printed as `null` — so a root span simply has no `parentSpanId` key.
+
+`$cid` is the **business correlation ID** — the value received from the external source or created at the
+edge, the same one `PostOffice.getMyCorrelationId()` returns. When the delivered event carries no business
+context, the key is simply **omitted**: internal correlation IDs (routing metadata such as RPC inbox
+references or the graph engine's skill-callback IDs) never appear under the `cid` label, so log aggregation
+always correlates on the ID your callers know — or on nothing, never on something misleading. Because every
+edge guarantees a business correlation ID (a fresh one is generated when the caller supplies none), **a
+missing `cid` on a traced log line indicates a propagation defect worth fixing**, not a normal condition.
 
 ### Adding your own key-values {#log-context-custom}
 
@@ -239,7 +352,7 @@ A log line from a traced function then carries the resolved `context` (from the 
     "timestamp": "2026-06-30T21:17:03Z"
   },
   "time": "2026-06-30 14:17:03.575",
-  "source": "com.accenture.demo.tasks.HelloException.handleEvent(HelloException.java:51)",
+  "source": "com.accenture.demo.tasks.HelloExceptionHandler.handleEvent(HelloExceptionHandler.java:51)",
   "thread": 297,
   "message": "User defined exception handler - status=404 error=Profile 100 not found"
 }
@@ -254,7 +367,7 @@ keys on display.)
 - The `context` block appears **only** when a request is traced and a `traceId` is present. Framework boot logs and
   logs emitted from a `Mono`/`Flux` completion that runs **after** the worker returns (on a different thread) carry
   no context — the same boundary distributed tracing has.
-- Feature **off** (no `app-log-context.yaml`) costs one boolean check per log line and nothing else.
+- Feature **off** (`app.log.context=false`) costs one boolean check per log line and nothing else.
 
 ## See also {#see-also}
 

@@ -55,6 +55,59 @@ class FlowTests extends TestBase {
     private static final String HTTP_CLIENT = "async.http.request";
 
     @Test
+    void reservedModelKeysAreProtectedAtCompileTime() {
+        // A data mapping that overwrites reserved metadata (model.cid, model.instance, model.flow,
+        // model.ttl, model.parent, model.root) is rejected by CompileFlows. Consistent with all
+        // other invalid mappings, the offending task is dropped at compile time (with an ERROR log),
+        // so the flow cannot execute it: parser-test-28 writes 'result.user -> model.cid' (output),
+        // parser-test-29 writes 'text(hacked) -> model.instance' (input).
+        var outputViolation = com.accenture.models.Flows.getFlow("parser-test-28");
+        assertNotNull(outputViolation);
+        assertFalse(outputViolation.tasks.containsKey("greeting.test"),
+                "task with an output mapping overwriting model.cid must be dropped");
+        var inputViolation = com.accenture.models.Flows.getFlow("parser-test-29");
+        assertNotNull(inputViolation);
+        assertFalse(inputViolation.tasks.containsKey("greeting.test"),
+                "task with an input mapping overwriting model.instance must be dropped");
+        var traceViolation = com.accenture.models.Flows.getFlow("parser-test-30");
+        assertNotNull(traceViolation);
+        assertFalse(traceViolation.tasks.containsKey("greeting.test"),
+                "task with an output mapping overwriting model.trace must be dropped");
+        var noneViolation = com.accenture.models.Flows.getFlow("parser-test-31");
+        assertNotNull(noneViolation);
+        assertFalse(noneViolation.tasks.containsKey("greeting.test"),
+                "task with an input mapping overwriting the model.none null constant must be dropped");
+        var runViolation = com.accenture.models.Flows.getFlow("parser-test-32");
+        assertNotNull(runViolation);
+        assertFalse(runViolation.tasks.containsKey("greeting.test"),
+                "task with an output mapping overwriting the model.run flag must be dropped");
+        // positive control: the same task name loads fine in a fixture without reserved-key writes
+        var control = com.accenture.models.Flows.getFlow("greetings");
+        assertNotNull(control, "valid flows still load");
+        assertFalse(control.tasks.isEmpty());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void dynamicModelTargetResolvingToReservedKeyFailsAtRuntime() throws Exception {
+        // 'dynamic-reserved-key' compiles cleanly because its RHS 'model.{model.pointer}' is only
+        // resolved at runtime; TaskExecutor re-checks the resolved form ('model.none') and aborts
+        // the task, routing the error to the flow's exception handler.
+        Utility util = Utility.getInstance();
+        Map<String, Object> dataset = new HashMap<>();
+        dataset.put("body", Map.of("hello", "world"));
+        dataset.put("header", Map.of());
+        EventEnvelope result = FlowExecutor.getInstance()
+                .request("unit.test", util.getUuid(), "TEST /dynamic/reserved",
+                        "dynamic-reserved-key", dataset, util.getUuid(), 8000).get();
+        assertInstanceOf(Map.class, result.getBody());
+        Map<String, Object> body = (Map<String, Object>) result.getBody();
+        String message = String.valueOf(body.get("message"));
+        assertTrue(message.contains("reserved state-machine key"), "unexpected error: " + body);
+        assertTrue(message.contains("model.none"), "the error should name the reserved key: " + body);
+    }
+
+    @Test
     void inputValidationTest1() throws InterruptedException {
         inputValidationCase(1, "12345", "hello world", false);
     }
@@ -324,6 +377,75 @@ class FlowTests extends TestBase {
         assertEquals("application/json", map.getElement("headers.accept"));
         assertEquals("application/json", map.getElement("headers.content-type"));
         assertEquals("async-http-client", map.getElement("headers.user-agent"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void declarativeHttpTaskPropagatesTraceContext() throws ExecutionException, InterruptedException {
+        // The application-to-application case using DECLARATIVE means: a traced flow's task invokes
+        // "async.http.request" via input data mapping (process: 'async.http.request'), the same way
+        // a programmatic caller would use PostOffice. The outbound HTTP call must carry the flow's
+        // trace context (X-Trace-Id + W3C traceparent) so the downstream application continues the
+        // SAME distributed trace. The echo endpoint returns the headers it received on the wire.
+        final long timeout = 8000;
+        final String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        final String traceparent = "00-" + traceId + "-00f067aa0ba902b7-01";
+        AsyncHttpRequest request = new AsyncHttpRequest();
+        request.setTargetHost(host).setMethod("POST")
+                .setHeader("accept", "application/json")
+                .setHeader("content-type", "application/json")
+                .setHeader("traceparent", traceparent)
+                .setUrl("/api/http/client/by/config/trace");
+        request.setBody(Map.of("hello", "trace"));
+        EventEnvelope req = new EventEnvelope().setTo(HTTP_CLIENT).setBody(request);
+        // send from an UNTRACED context so the explicitly set traceparent passes through to the
+        // ingress endpoint (tracing: true), which adopts it as the flow's trace context
+        EventEnvelope result = EventEmitter.getInstance().eRequest(req, timeout).get();
+        assertInstanceOf(Map.class, result.getBody());
+        MultiLevelMap map = new MultiLevelMap((Map<String, Object>) result.getBody());
+        // the declarative async.http.request task stamped the flow's trace context downstream
+        assertEquals(traceId, map.getElement("headers.x-trace-id"),
+                "flow's trace-id should be stamped on the outbound declarative HTTP call");
+        String forwarded = String.valueOf(map.getElement("headers.traceparent"));
+        assertTrue(forwarded.contains(traceId),
+                "W3C traceparent should carry the flow's trace-id, got: " + forwarded);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void declarativeSinkHttpTaskPropagatesTraceContext() throws ExecutionException, InterruptedException {
+        // The same declarative application-to-application case, in the field's exact flow shape:
+        // an immediate response task followed by a fire-and-forget (execution: sink) task that
+        // invokes "async.http.request". The sink task's outbound call must still carry the flow's
+        // trace context. The recorder endpoint captures the headers received on the wire because
+        // a sink task's result never reaches the flow output.
+        final long timeout = 8000;
+        final String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        final String traceparent = "00-" + traceId + "-00f067aa0ba902b7-01";
+        com.accenture.service.TraceRecorderEndpoint.RECEIVED_HEADERS.clear();
+        AsyncHttpRequest request = new AsyncHttpRequest();
+        request.setTargetHost(host).setMethod("POST")
+                .setHeader("accept", "application/json")
+                .setHeader("content-type", "application/json")
+                .setHeader("traceparent", traceparent)
+                .setUrl("/api/http/sink/trace");
+        request.setBody(Map.of("hello", "sink"));
+        EventEnvelope req = new EventEnvelope().setTo(HTTP_CLIENT).setBody(request);
+        // untraced sender so the explicitly set traceparent passes through to the traced ingress
+        EventEnvelope result = EventEmitter.getInstance().eRequest(req, timeout).get();
+                assertEquals("accepted", result.getBody());
+        // the sink task fires after the response - poll the recorder for the wire-level headers
+        Map<String, String> received = null;
+        try {
+            received = com.accenture.service.TraceRecorderEndpoint.RECEIVED_HEADERS.poll(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        assertNotNull(received, "the sink task should have delivered the downstream HTTP call");
+        assertEquals(traceId, received.get("x-trace-id"),
+                "flow's trace-id should be stamped on the sink task's outbound HTTP call");
+        assertTrue(String.valueOf(received.get("traceparent")).contains(traceId),
+                "W3C traceparent should carry the flow's trace-id, got: " + received.get("traceparent"));
     }
 
     @SuppressWarnings("unchecked")

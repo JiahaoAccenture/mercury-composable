@@ -27,19 +27,31 @@ Redis return route.*
 In a cloud-native deployment the REST caller and the backend that answers may be different pods, and the
 backend is reached **asynchronously** over Kafka. Sync-over-async bridges that gap: the HTTP thread waits
 while the request fans out over Kafka and the answer is routed back — without coupling the two pods beyond a
-shared Redis and topic pair. It builds on the [Kafka Flow Adapter](kafka-flow-adapter.md) for the Kafka legs.
+shared Redis and topic pair. It builds on the [Minimalist Kafka](minimalist-kafka.md) for the Kafka legs.
 
 > **Opt-in.** The return-route coordinator eagerly connects to Redis, so it starts only when
 > `sync.over.async.enabled=true`. Leave it off unless you are using the pattern.
 
 ## The pattern {#pattern}
 
-```text
-REST (sync) → service on POD-1
-  → register return route in Redis (key = correlation-id) + publish request to Kafka
-      → backend service on POD-2 (async) processes, publishes response to Kafka
-        → POD-1's reply consumer stores the response in Redis + wakes POD-1 (Pub/Sub)
-          → POD-1's blocked HTTP thread returns the response (or 408 on timeout)
+```mermaid
+sequenceDiagram
+    participant Caller as REST caller
+    participant Pod1 as service (POD-1)
+    participant Redis
+    participant Kafka
+    participant Pod2 as backend service (POD-2)
+
+    Caller->>Pod1: HTTP request (sync)
+    Pod1->>Redis: register return route (key = correlation-id)
+    Pod1->>Kafka: publish request
+    note over Pod1: blocked HTTP thread waits<br>(suspended virtual thread)
+    Kafka->>Pod2: consume request (async)
+    Pod2->>Kafka: publish response
+    Kafka->>Pod1: reply consumer receives response
+    Pod1->>Redis: store response + wake via Pub/Sub
+    Redis-->>Pod1: wake-up (Pub/Sub)
+    Pod1-->>Caller: HTTP response (or 408 on timeout)
 ```
 
 The correlation-id threads the whole round trip. Redis holds two short-lived keys per request: the **route**
@@ -91,12 +103,12 @@ Reach for sync-over-async when you need a **synchronous REST facade over an asyn
 and want a lightweight Redis return path rather than the full Kafka [service mesh](service-mesh.md) with
 presence discovery. Like the mesh, it is an advanced opt-in: if your application does not need cross-pod
 synchronous request/response, design it cloud-native and skip this. The Kafka legs use the
-[Kafka Flow Adapter](kafka-flow-adapter.md); the synchronous facade itself is an ordinary composable function
+[Minimalist Kafka](minimalist-kafka.md); the synchronous facade itself is an ordinary composable function
 behind `rest.yaml`.
 
 ## See also
 
-- [Kafka Flow Adapter](kafka-flow-adapter.md) — the inbound/outbound Kafka building blocks this pattern uses.
+- [Minimalist Kafka](minimalist-kafka.md) — the inbound/outbound Kafka building blocks this pattern uses.
 - [Configuration Reference](configuration-reference.md#sync-over-async) — every `redis.*` / `sync.*` key.
 - [Minimalist Service Mesh](service-mesh.md) — the heavier `cloud.connector=kafka` alternative with service discovery.
 - [Observability](observability.md) — tracing the round trip end-to-end.
